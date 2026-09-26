@@ -21,6 +21,7 @@ from pyrogram import Client, filters, enums
 from pyrogram.types import Message as PyroMessage, InlineQueryResultArticle, InputTextMessageContent
 from pyrogram.errors import SessionPasswordNeeded, FloodWait
 from pyrogram.handlers import MessageHandler
+from pyrogram.raw.types import MessageEntityBlockquote
 
 # ----------------- CONFIG -----------------
 BOT_TOKEN = "8200221816:AAEy7BSmi08HwAJY7QNLl9WdE6StI90LDqg"
@@ -47,6 +48,13 @@ HOURLY_COST = 2
 # ساعت نام سلف؛ 210 دقیقه یعنی UTC+03:30 (قابل تغییر برای ساعت محل شما)
 CLOCK_UTC_OFFSET_MINUTES = 210
 
+# عکس پیش‌فرض پنل اصلی استارت (باید کنار همین فایل bot.py قرار بگیرد)
+try:
+    _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    _BASE_DIR = os.getcwd()
+START_IMAGE_PATH = os.path.join(_BASE_DIR, "start_image.png")
+
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 logging.basicConfig(level=logging.INFO)
 db_lock = threading.RLock()
@@ -58,6 +66,7 @@ LOGIN_LOOPS = {}
 temp_data = {}
 AUTH_FLOOD_UNTIL = {}  # uid -> unix timestamp; prevents repeated SendCode attempts
 SELF_TASKS = {}
+POSTER_TASKS = {}  # uid -> asyncio.Task حلقه ارسال خودکار «تبچی گروهی»
 ADMIN_STATE = {}
 
 # وضعیت‌های runtime سلف (دستورات راهنمای AX)
@@ -210,6 +219,10 @@ def init_db():
             "enemy_replies": "ALTER TABLE self_settings ADD COLUMN enemy_replies TEXT DEFAULT '[]'",
             "friend_replies": "ALTER TABLE self_settings ADD COLUMN friend_replies TEXT DEFAULT '[]'",
             "crash_replies": "ALTER TABLE self_settings ADD COLUMN crash_replies TEXT DEFAULT '[]'",
+"poster_on": "ALTER TABLE self_settings ADD COLUMN poster_on INTEGER DEFAULT 0",
+            "poster_text": "ALTER TABLE self_settings ADD COLUMN poster_text TEXT DEFAULT ''",
+            "poster_interval": "ALTER TABLE self_settings ADD COLUMN poster_interval INTEGER DEFAULT 60",
+            "poster_chat_id": "ALTER TABLE self_settings ADD COLUMN poster_chat_id INTEGER DEFAULT 0",
         }
         for col, sql in extra_cols.items():
             if col not in cols:
@@ -373,7 +386,8 @@ def get_self_settings(uid: int):
                               base_first_name,base_last_name,is_bio_on,is_seen_on,is_typing_on,anti_raid,tabchi_on,tabchi_text,
                               bold_mode,auto_save,anti_report,enemy_active,friend_active,crash_active,pv_lock,
                               pv_photo,pv_video,pv_gif,pv_voice,pv_music,pv_sticker,pv_doc,
-                              enemy_list,friend_list,crash_list,enemy_replies,friend_replies,crash_replies
+                              enemy_list,friend_list,crash_list,enemy_replies,friend_replies,crash_replies,
+                              poster_on,poster_text,poster_interval,poster_chat_id
                        FROM self_settings WHERE user_id=?""", (uid,))
         r = cur.fetchone()
         if not r:
@@ -382,7 +396,8 @@ def get_self_settings(uid: int):
               'base_first_name','base_last_name','is_bio_on','is_seen_on','is_typing_on','anti_raid','tabchi_on','tabchi_text',
               'bold_mode','auto_save','anti_report','enemy_active','friend_active','crash_active','pv_lock',
               'pv_photo','pv_video','pv_gif','pv_voice','pv_music','pv_sticker','pv_doc',
-              'enemy_list','friend_list','crash_list','enemy_replies','friend_replies','crash_replies']
+              'enemy_list','friend_list','crash_list','enemy_replies','friend_replies','crash_replies',
+              'poster_on','poster_text','poster_interval','poster_chat_id']
         d=dict(zip(keys,r))
         for k in ('enemy_list','friend_list','crash_list','enemy_replies','friend_replies','crash_replies'):
             try: d[k]=json.loads(d.get(k) or '[]')
@@ -493,18 +508,93 @@ def cmd_start(m: types.Message):
             pass
 
     if in_private(m):
-        text = get_setting("start_text") or "سلام 👋\nبه ربات VIP خوش آمدید 🌟\nاز منو زیر گزینه مورد نظر را انتخاب کنید."
-        photo_id = get_setting("start_photo")
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.row("≼ سـلـفـ 𝐕𝐢𝐏 🔑 ≽", "≼ شـارژ مـوجـودی 💳 ≽")
-        markup.row("≼ الماس رایگان  🎁 ≽", "≼ پروفایل 👤 ≽")
-        if photo_id:
-            try:
-                bot.send_photo(m.chat.id, photo_id, caption=text, reply_markup=markup)
-            except:
-                bot.send_message(m.chat.id, text, reply_markup=markup)
-        else:
-            bot.send_message(m.chat.id, text, reply_markup=markup)
+        _send_main_panel(m.chat.id)
+
+# ============================================================
+# ✅ پنل اصلی شیشه‌ای (Self Iran)
+# ============================================================
+MAIN_PANEL_CAPTION = "✨ Self Iran پنل اصلی"
+
+ABOUT_SELF_TEXT = (
+    "🤖 سلف چیست؟\n\n"
+    "✨ سلف یک ربات است که قابلیت‌های زیادی به اکانت شما اضافه می‌کند.\n\n"
+    "📸 سیو عکس و ویدیوهای زمان‌دار\n\n"
+    "📢 تبچی و تبلیغات\n\n"
+    "⚡ و ده‌ها قابلیت جذاب دیگر..."
+)
+
+def _main_menu_markup():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.row(types.InlineKeyboardButton("فعال‌سازی سلف 🔑", callback_data="mm:self"))
+    kb.row(
+        types.InlineKeyboardButton("حساب کاربری 👤", callback_data="mm:profile"),
+        types.InlineKeyboardButton("الماس رایگان 💎", callback_data="mm:gift")
+    )
+    kb.row(types.InlineKeyboardButton("خرید الماس 💸", callback_data="mm:buy"))
+    kb.row(
+        types.InlineKeyboardButton("پشتیبانی ✅", url="https://t.me/AliZord_yt"),
+        types.InlineKeyboardButton("چنل ✅", url="https://t.me/self_madeiran")
+    )
+    kb.row(types.InlineKeyboardButton("سلف چیست؟ 🤖", callback_data="mm:about"))
+    return kb
+
+def _back_markup():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="mm:back"))
+    return kb
+
+def _send_main_panel(chat_id):
+    photo_id = get_setting("start_photo")
+    if photo_id:
+        try:
+            bot.send_photo(chat_id, photo_id, caption=MAIN_PANEL_CAPTION, reply_markup=_main_menu_markup())
+            return
+        except Exception:
+            pass
+    try:
+        with open(START_IMAGE_PATH, "rb") as f:
+            sent = bot.send_photo(chat_id, f, caption=MAIN_PANEL_CAPTION, reply_markup=_main_menu_markup())
+        try:
+            set_setting("start_photo", sent.photo[-1].file_id)
+        except Exception:
+            pass
+    except Exception:
+        bot.send_message(chat_id, MAIN_PANEL_CAPTION, reply_markup=_main_menu_markup())
+
+class _MenuCtx:
+    """شیء سبک برای صداکردن مستقیم توابع منوی قدیمی (cmd_self / cmd_profile) از داخل کال‌بک شیشه‌ای."""
+    def __init__(self, chat, from_user):
+        self.chat = chat
+        self.from_user = from_user
+        self.message_id = None
+        self.text = None
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("mm:"))
+def cb_main_menu(c: types.CallbackQuery):
+    action = c.data.split(":", 1)[1]
+    chat_id = c.message.chat.id
+    ctx = _MenuCtx(c.message.chat, c.from_user)
+    bot.answer_callback_query(c.id)
+    try:
+        bot.delete_message(chat_id, c.message.message_id)
+    except Exception:
+        pass
+    if action == "self":
+        cmd_self(ctx)
+        bot.send_message(chat_id, "⬆️ برای بازگشت:", reply_markup=_back_markup())
+    elif action == "profile":
+        cmd_profile(ctx)
+        bot.send_message(chat_id, "⬆️ برای بازگشت:", reply_markup=_back_markup())
+    elif action == "gift":
+        count = get_ref_count(c.from_user.id)
+        link = f"https://t.me/{BOT_USERNAME}?start={c.from_user.id}"
+        bot.send_message(chat_id, FREE_DIAMOND_TEXT.format(count=count, link=link), reply_markup=_back_markup())
+    elif action == "buy":
+        bot.send_message(chat_id, "برای خرید به آیدی‌های زیر مراجعه کنید:\n👤 مالک: @AliZord_yt", reply_markup=_back_markup())
+    elif action == "about":
+        bot.send_message(chat_id, ABOUT_SELF_TEXT, reply_markup=_back_markup())
+    elif action == "back":
+        _send_main_panel(chat_id)
 
 # ============================================================
 # ✅ بخش احراز هویت با کد تلگرام
@@ -673,7 +763,8 @@ def generate_ax_panel_markup(uid):
     kb = types.InlineKeyboardMarkup(row_width=3)
     kb.row(
         types.InlineKeyboardButton(f"ساعت {c(s.get('is_clock_on'))}", callback_data=f"axp:clock:{uid}"),
-        types.InlineKeyboardButton(f"بولد {c(s.get('bold_mode'))}", callback_data=f"axp:bold:{uid}")
+        types.InlineKeyboardButton(f"بولد {c(s.get('bold_mode'))}", callback_data=f"axp:bold:{uid}"),
+        types.InlineKeyboardButton(f"نقل قول {c(s.get('text_mode')=='quote')}", callback_data=f"axp:quote:{uid}")
     )
     kb.row(types.InlineKeyboardButton(f"تغییر فونت: {preview}", callback_data=f"axp:font:{uid}"))
     kb.row(
@@ -690,6 +781,10 @@ def generate_ax_panel_markup(uid):
         types.InlineKeyboardButton(f"دشمن {c(s.get('enemy_active'))}", callback_data=f"axp:enemy:{uid}"),
         types.InlineKeyboardButton(f"دوست {c(s.get('friend_active'))}", callback_data=f"axp:friend:{uid}"),
         types.InlineKeyboardButton(f"کراش {c(s.get('crash_active'))}", callback_data=f"axp:crash:{uid}")
+    )
+    kb.row(
+        types.InlineKeyboardButton(f"📢 تبچی {c(s.get('poster_on'))}", callback_data=f"axp:poster:{uid}"),
+        types.InlineKeyboardButton("🗑 پاکسازی تبچی", callback_data=f"axp:posterclear:{uid}")
     )
     kb.row(types.InlineKeyboardButton(f"🔒 قفل کل پیوی {c(s.get('pv_lock'))}", callback_data=f"axp:pvlock:{uid}"))
     kb.row(types.InlineKeyboardButton("🔻 قفل‌های رسانه پیوی 🔻", callback_data="axp:none:"+str(uid)))
@@ -725,6 +820,7 @@ def ax_panel_text(uid):
         f"⌨️ تایپ: {'روشن ✅' if s.get('is_typing_on') else 'خاموش ❌'}\n"
         f"🛡 سپر ضد ریپ: {'روشن ✅' if s.get('anti_report',1) else 'خاموش ❌'}\n"
         f"👤 دشمن/دوست/کراش: {'روشن' if s.get('enemy_active') or s.get('friend_active') or s.get('crash_active') else 'خاموش'}\n"
+        f"📢 تبچی گروهی: {'روشن ✅' if s.get('poster_on') else 'خاموش ❌'}\n"
         f"🔒 قفل پیوی: {'روشن ✅' if s.get('pv_lock') else 'خاموش ❌'}"
     )
 
@@ -738,7 +834,7 @@ def ax_inline_panel(q):
             switch_pm_text="ابتدا سلف را فعال کنید", switch_pm_parameter="start"
         )
     result = types.InlineQueryResultArticle(
-        id=f"ax_panel_{uid}",
+        id=f"ax_panel_{uid}_{int(time.time()*1000)}",
         title="🧊 پنل شیشه‌ای سلف",
         description="پنل حرفه‌ای دستورات سلف",
         input_message_content=types.InputTextMessageContent(ax_panel_text(uid), parse_mode="HTML"),
@@ -782,7 +878,12 @@ def ax_panel_callback(c):
             value = 0 if s.get(key, 0) else 1
             set_self_settings(uid, key, value)
             if action == "clock":
-                refresh_clock_profile(uid)
+                ok, err = refresh_clock_profile(uid)
+                if not ok:
+                    try:
+                        bot.answer_callback_query(c.id, f"⚠️ ساعت ذخیره شد ولی نام پروفایل تغییر نکرد: {err}", show_alert=True)
+                    except Exception:
+                        pass
             run_self_message(uid, f"✅ {key} {'روشن' if value else 'خاموش'} شد")
         elif action == "bold":
             value = 0 if s.get("bold_mode",0) else 1
@@ -793,6 +894,20 @@ def ax_panel_callback(c):
             mode = action if s.get("text_mode") != action else "normal"
             set_self_settings(uid, "text_mode", mode)
             run_self_message(uid, f"حالت متن: {mode}")
+        elif action == "poster":
+            if not s.get("poster_chat_id") or not (s.get("poster_text") or "").strip():
+                return bot.answer_callback_query(
+                    c.id, "❌ اول داخل گروه دستور «تنظیم تبچی [ثانیه] [متن]» را بزنید.", show_alert=True
+                )
+            value = 0 if s.get("poster_on", 0) else 1
+            set_self_settings(uid, "poster_on", value)
+            run_self_message(uid, f"📢 تبچی گروهی {'روشن' if value else 'خاموش'} شد")
+        elif action == "posterclear":
+            set_self_settings(uid, "poster_on", 0)
+            set_self_settings(uid, "poster_text", "")
+            set_self_settings(uid, "poster_chat_id", 0)
+            set_self_settings(uid, "poster_interval", 60)
+            run_self_message(uid, "🗑 تنظیمات تبچی پاک شد.")
         elif action == "font":
             fonts = FONT_KEYS_ORDER
             cur = s.get("font_style", "font1")
@@ -858,9 +973,9 @@ CLOCK_SUFFIX_RE = re.compile(r"(?:\s*[%s]+)+$" % re.escape(CLOCK_FONT_CHARS))
 # فونت‌های ساعت؛ با هر بار زدن دکمه یکی عوض می‌شود.
 FONT_STYLES = {
     "font1": str.maketrans("0123456789:", "0123456789:"),
-    "font2": str.maketrans("0123456789:", "⁰¹²³⁴⁵⁶⁷⁸⁹ː"),
+    "font2": str.maketrans("0123456789:", "⁰¹²³⁴⁵⁶⁷⁸⁹:"),
     "font3": str.maketrans("0123456789:", "⓪①②③④⑤⑥⑦⑧⑨∶"),
-    "font4": str.maketrans("0123456789:", "０１２３４５６７８９："),
+    "font4": str.maketrans("0123456789:", "０１２３４５６７８９:"),
     "font5": str.maketrans("0123456789:", "𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗:"),
     "font6": str.maketrans("0123456789:", "𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡:"),
     "font7": str.maketrans("0123456789:", "𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫:"),
@@ -1035,7 +1150,10 @@ async def _apply_text_style(message, uid):
         if mode == "bold":
             await message.edit_text(f"<b>{_escape_html(raw)}</b>", parse_mode=enums.ParseMode.HTML)
         elif mode == "quote":
-            await message.edit_text(f"<blockquote>{_escape_html(raw)}</blockquote>", parse_mode=enums.ParseMode.HTML)
+            try:
+                await message.edit_text(raw, entities=[MessageEntityBlockquote(offset=0, length=len(raw))])
+            except Exception:
+                await message.edit_text(f"「{raw}」")
         elif mode == "spoiler":
             await message.edit_text(f"<tg-spoiler>{_escape_html(raw)}</tg-spoiler>", parse_mode=enums.ParseMode.HTML)
     except Exception:
@@ -1066,6 +1184,25 @@ async def _clock_loop(client, uid):
     except Exception:
         logging.exception("clock loop stopped for %s", uid)
 
+async def _group_poster_loop(client, uid):
+    try:
+        while is_self_active(uid):
+            s = get_self_settings(uid)
+            chat_id = s.get("poster_chat_id")
+            text = (s.get("poster_text") or "").strip()
+            interval = max(10, int(s.get("poster_interval") or 60))
+            if s.get("poster_on") and chat_id and text:
+                try:
+                    await client.send_message(int(chat_id), text)
+                except Exception as e:
+                    logging.debug("group poster send failed for %s: %s", uid, e)
+                await asyncio.sleep(interval)
+            else:
+                await asyncio.sleep(5)
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logging.exception("group poster loop stopped for %s", uid)
 async def _incoming_features(client, message, uid):
     if not message.from_user or message.from_user.is_bot or message.outgoing:
         return
@@ -1281,7 +1418,23 @@ async def _self_runtime_handler(client, message):
         except Exception: await message.reply_text(HELP_TEXT, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
         return
 
-    # دشمن/دوست/کراش
+    if low == "پاکسازی تبچی":
+        set_self_settings(uid, "poster_on", 0)
+        set_self_settings(uid, "poster_text", "")
+        set_self_settings(uid, "poster_chat_id", 0)
+        set_self_settings(uid, "poster_interval", 60)
+        return await message.edit_text("🗑 تنظیمات تبچی پاک شد.")
+    m=re.match(r"^تنظیم تبچی\s+(\d+)\s+(.+)$",cmd,re.S)
+    if m:
+        if not message.chat or message.chat.type not in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
+            return await message.edit_text("❌ این دستور فقط داخل گروه کار می‌کند.")
+        sec, txt = m.groups()
+        sec = max(10, int(sec)); txt = txt.strip()
+        set_self_settings(uid, "poster_interval", sec)
+        set_self_settings(uid, "poster_text", txt)
+        set_self_settings(uid, "poster_chat_id", message.chat.id)
+        return await message.edit_text(f"✅ تبچی تنظیم شد.\n⏱ هر {sec} ثانیه در همین گروه ارسال می‌شود.\nبرای روشن/خاموش کردنش از «پنل» استفاده کنید.")
+# دشمن/دوست/کراش
     m=re.match(r"^(تنظیم|حذف) (دشمن|دوست|کراش)$", cmd)
     if m:
         op,typ=m.groups(); target=message.reply_to_message.from_user if message.reply_to_message else None
@@ -1486,6 +1639,11 @@ async def _attach_self_runtime(client, uid):
         try: old.cancel()
         except Exception: pass
     SELF_TASKS[uid]=asyncio.create_task(_clock_loop(client,uid))
+    old_poster=POSTER_TASKS.pop(uid,None)
+    if old_poster:
+        try: old_poster.cancel()
+        except Exception: pass
+    POSTER_TASKS[uid]=asyncio.create_task(_group_poster_loop(client,uid))
 
 async def self_panel_command_controller(client, message):
     """پنل شیشه‌ای؛ مخصوصاً برای Saved Messages با fallback مطمئن."""
@@ -1696,6 +1854,10 @@ def cb_self(c):
         task = SELF_TASKS.pop(user_id, None)
         if task:
             try: task.cancel()
+            except Exception: pass
+        poster_task = POSTER_TASKS.pop(user_id, None)
+        if poster_task:
+            try: poster_task.cancel()
             except Exception: pass
         if live:
             async def _restore_and_stop():
@@ -2059,6 +2221,7 @@ def admin_main_markup(uid):
         types.InlineKeyboardButton("📋 لیست کاربران", callback_data="admin:list_users")
     )
     kb.row(types.InlineKeyboardButton("🎲 وضعیت شرط‌بندی", callback_data="admin:bets"))
+    kb.row(types.InlineKeyboardButton("🖼 تنظیم عکس استارت", callback_data="admin:set_start_photo"))
     kb.row(types.InlineKeyboardButton("❌ بستن", callback_data="admin:close"))
     return kb
 
@@ -2095,7 +2258,7 @@ def cb_admin(c):
         ADMIN_STATE[uid] = action
         title = "افزایش" if action == "give" else "کسر"
         return bot.edit_message_text(
-            f"💎 <b>{title} الماس</b>\n\n👤 روی پیام کاربر ریپلای کنید و فقط مقدار را بفرستید.\nیا به صورت <code>user_id amount</code> بفرستید.\nهمچنین می‌توانید ابتدا فقط <code>user_id</code> و سپس مقدار را بفرستید.",
+            f"💎 <b>{title} الماس</b>\n\n?? روی پیام کاربر ریپلای کنید و فقط مقدار را بفرستید.\nیا به صورت <code>user_id amount</code> بفرستید.\nهمچنین می‌توانید ابتدا فقط <code>user_id</code> و سپس مقدار را بفرستید.",
             c.message.chat.id,c.message.message_id,parse_mode="HTML",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back"))
         )
     if action=="forced":
@@ -2153,6 +2316,13 @@ def cb_admin(c):
             cancelled=conn.execute("SELECT COUNT(*) FROM bets WHERE state='cancelled'").fetchone()[0]
         text=f"🎲 <b>وضعیت شرط‌بندی</b>\n\n🟢 باز: {open_count}\n🏁 بسته: {closed_count}\n❌ لغوشده: {cancelled}\n\nدستور گروه: <code>شرطبندی 20</code>"
         return bot.edit_message_text(text,c.message.chat.id,c.message.message_id,reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back")),parse_mode="HTML")
+    if action=="set_start_photo":
+        ADMIN_STATE[uid]="set_start_photo"
+        return bot.edit_message_text(
+            "🖼 یک عکس بفرستید تا به‌عنوان عکس پنل اصلی استارت ذخیره شود.",
+            c.message.chat.id,c.message.message_id,
+            reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back"))
+        )
     if action=="back":
         return bot.edit_message_text("⚙️ <b>پنل مدیریت CIP</b>", c.message.chat.id, c.message.message_id, reply_markup=admin_main_markup(uid), parse_mode="HTML")
     if action=="close":
@@ -2161,7 +2331,7 @@ def cb_admin(c):
         return
     bot.answer_callback_query(c.id)
 
-@bot.message_handler(func=lambda m: m.from_user and m.from_user.id in ADMIN_STATE)
+@bot.message_handler(content_types=['text','photo'], func=lambda m: m.from_user and m.from_user.id in ADMIN_STATE)
 def admin_state_handler(m: types.Message):
     uid=m.from_user.id; state=ADMIN_STATE.get(uid)
     if not is_admin(uid): ADMIN_STATE.pop(uid,None); return
@@ -2211,6 +2381,14 @@ def admin_state_handler(m: types.Message):
         ids=get_admin_ids()
         if target not in ids: ADMIN_STATE.pop(uid,None); return bot.reply_to(m,"ℹ️ این آیدی ادمین نیست.")
         ids.remove(target); save_admin_ids(ids); bot.reply_to(m,f"✅ ادمین <code>{target}</code> حذف شد.",parse_mode="HTML"); ADMIN_STATE.pop(uid,None)
+
+    elif state=="set_start_photo":
+        if m.content_type != "photo" or not m.photo:
+            return bot.reply_to(m,"❌ لطفاً یک عکس ارسال کنید.")
+        file_id = m.photo[-1].file_id
+        set_setting("start_photo", file_id)
+        ADMIN_STATE.pop(uid,None)
+        bot.reply_to(m,"✅ عکس پنل اصلی استارت ذخیره شد.")
 
 @bot.message_handler(commands=['give'])
 def cmd_give(m: types.Message):
