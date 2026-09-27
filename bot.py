@@ -117,6 +117,24 @@ def forced_join_markup(channels):
 
 LOGIN_LOOP = asyncio.new_event_loop()
 
+def _btn(text, style=None, **kwargs):
+    """دکمه‌ی شیشه‌ای با رنگ (قابلیت جدید تلگرام: primary=آبی, success=سبز, danger=قرمز).
+    اگر نسخه‌ی نصب‌شده‌ی pyTelegramBotAPI از پارامتر style پشتیبانی نکند،
+    بدون رنگ (حالت عادی) ساخته می‌شود تا ربات کرش نکند."""
+    if style:
+        try:
+            return types.InlineKeyboardButton(text, style=style, **kwargs)
+        except TypeError:
+            pass
+    return types.InlineKeyboardButton(text, **kwargs)
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("noop:"))
+def cb_noop(c: types.CallbackQuery):
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
+
 def _login_loop_worker():
     asyncio.set_event_loop(LOGIN_LOOP)
     LOGIN_LOOP.run_forever()
@@ -227,6 +245,11 @@ def init_db():
         for col, sql in extra_cols.items():
             if col not in cols:
                 cur.execute(sql)
+        # ستون is_photo: تشخیص اینکه پیام شرط‌بندی به‌صورت عکس فرستاده شده یا متن ساده
+        cur.execute("PRAGMA table_info(bets)")
+        bet_cols = [r[1] for r in cur.fetchall()]
+        if "is_photo" not in bet_cols:
+            cur.execute("ALTER TABLE bets ADD COLUMN is_photo INTEGER DEFAULT 0")
         conn.commit()
 
 # ----------------- توابع کمکی -----------------
@@ -508,6 +531,11 @@ def cmd_start(m: types.Message):
             pass
 
     if in_private(m):
+        try:
+            _rm = bot.send_message(m.chat.id, "⏳", reply_markup=types.ReplyKeyboardRemove())
+            bot.delete_message(m.chat.id, _rm.message_id)
+        except Exception:
+            pass
         _send_main_panel(m.chat.id)
 
 # ============================================================
@@ -525,22 +553,22 @@ ABOUT_SELF_TEXT = (
 
 def _main_menu_markup():
     kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.row(types.InlineKeyboardButton("فعال‌سازی سلف 🔑", callback_data="mm:self"))
+    kb.row(_btn("فعال‌سازی سلف 🔑", style="success", callback_data="mm:self"))
     kb.row(
-        types.InlineKeyboardButton("حساب کاربری 👤", callback_data="mm:profile"),
-        types.InlineKeyboardButton("الماس رایگان 💎", callback_data="mm:gift")
+        _btn("حساب کاربری 👤", style="primary", callback_data="mm:profile"),
+        _btn("الماس رایگان 💎", style="success", callback_data="mm:gift")
     )
-    kb.row(types.InlineKeyboardButton("خرید الماس 💸", callback_data="mm:buy"))
+    kb.row(_btn("خرید الماس 💸", style="primary", callback_data="mm:buy"))
     kb.row(
-        types.InlineKeyboardButton("پشتیبانی ✅", url="https://t.me/AliZord_yt"),
-        types.InlineKeyboardButton("چنل ✅", url="https://t.me/self_madeiran")
+        _btn("پشتیبانی ✅", style="primary", url="https://t.me/AliZord_yt"),
+        _btn("چنل ✅", style="primary", url="https://t.me/self_madeiran")
     )
-    kb.row(types.InlineKeyboardButton("سلف چیست؟ 🤖", callback_data="mm:about"))
+    kb.row(_btn("سلف چیست؟ 🤖", style="primary", callback_data="mm:about"))
     return kb
 
 def _back_markup():
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="mm:back"))
+    kb.add(_btn("🔙 بازگشت", style="danger", callback_data="mm:back"))
     return kb
 
 def _send_main_panel(chat_id):
@@ -580,11 +608,9 @@ def cb_main_menu(c: types.CallbackQuery):
     except Exception:
         pass
     if action == "self":
-        cmd_self(ctx)
-        bot.send_message(chat_id, "⬆️ برای بازگشت:", reply_markup=_back_markup())
+        cmd_self(ctx, with_back=True)
     elif action == "profile":
-        cmd_profile(ctx)
-        bot.send_message(chat_id, "⬆️ برای بازگشت:", reply_markup=_back_markup())
+        cmd_profile(ctx, with_back=True)
     elif action == "gift":
         count = get_ref_count(c.from_user.id)
         link = f"https://t.me/{BOT_USERNAME}?start={c.from_user.id}"
@@ -601,13 +627,15 @@ def cb_main_menu(c: types.CallbackQuery):
 # ============================================================
 
 @bot.message_handler(func=lambda m: in_private(m) and m.text and m.text.strip() == "≼ سـلـفـ 𝐕𝐢𝐏 🔑 ≽")
-def cmd_self(m: types.Message):
+def cmd_self(m: types.Message, with_back=False):
     uid = m.from_user.id
     ensure_user(uid)
 
     if is_self_active(uid):
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("❌ حذف کردن سلف", callback_data="self:deactivate"))
+        markup.add(_btn("❌ حذف کردن سلف", style="danger", callback_data="self:deactivate"))
+        if with_back:
+            markup.add(_btn("🔙 بازگشت", style="primary", callback_data="mm:back"))
         bot.send_message(m.chat.id, "✅ سلف شما فعال است!\nبرای غیر فعال کردن روی دکمه زیر کلیک کنید.", reply_markup=markup)
         return
 
@@ -617,7 +645,8 @@ def cmd_self(m: types.Message):
             m.chat.id,
             f"❌ موجودی کافی نیست.\n"
             f"هزینه فعال‌سازی سلف: {ACTIVATE_COST} الماس\n"
-            f"موجودی شما: {balance} الماس"
+            f"موجودی شما: {balance} الماس",
+            reply_markup=(_back_markup() if with_back else None)
         )
         return
 
@@ -700,13 +729,10 @@ def handle_contact(m: types.Message):
                 "activation_paid": True
             }
 
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-            markup.row("≼ سـلـفـ 𝐕𝐢𝐏 🔑 ≽", "≼ شـارژ مـوجـودی 💳 ≽")
-            markup.row("≼ الماس رایگان  🎁 ≽", "≼ پروفایل 👤 ≽")
             bot.send_message(
                 uid,
                 "✅ کد تایید به تلگرام شما ارسال شد.\n📝 لطفاً کد ۵ رقمی را که از تلگرام دریافت کردید را با فاصله وارد کنید مثل  ( 5 4 6 1 2 ) :",
-                reply_markup=markup
+                reply_markup=types.ReplyKeyboardRemove()
             )
         except FloodWait as e:
             # این محدودیت از سمت Telegram است و قابل دور زدن نیست.
@@ -758,71 +784,123 @@ def _panel_check(uid, value):
 def generate_ax_panel_markup(uid):
     s = get_self_settings(uid)
     def c(v): return "✅" if bool(v) else "❌"
+    def st(v): return "success" if bool(v) else "danger"
     font = s.get("font_style","font1")
     preview = format_clock_by_font("12:34", font)
     kb = types.InlineKeyboardMarkup(row_width=3)
     kb.row(
-        types.InlineKeyboardButton(f"ساعت {c(s.get('is_clock_on'))}", callback_data=f"axp:clock:{uid}"),
-        types.InlineKeyboardButton(f"بولد {c(s.get('bold_mode'))}", callback_data=f"axp:bold:{uid}"),
-        types.InlineKeyboardButton(f"نقل قول {c(s.get('text_mode')=='quote')}", callback_data=f"axp:quote:{uid}")
+        _btn(f"ساعت {c(s.get('is_clock_on'))}", style=st(s.get('is_clock_on')), callback_data=f"axp:clock:{uid}"),
+        _btn(f"بولد {c(s.get('bold_mode'))}", style=st(s.get('bold_mode')), callback_data=f"axp:bold:{uid}"),
+        _btn(f"نقل قول {c(s.get('text_mode')=='quote')}", style=st(s.get('text_mode')=='quote'), callback_data=f"axp:quote:{uid}")
     )
-    kb.row(types.InlineKeyboardButton(f"تغییر فونت: {preview}", callback_data=f"axp:font:{uid}"))
+    kb.row(_btn(f"تغییر فونت: {preview}", style="primary", callback_data=f"axp:font:{uid}"))
     kb.row(
-        types.InlineKeyboardButton(f"منشی {c(s.get('is_auto_reply_on'))}", callback_data=f"axp:reply:{uid}"),
-        types.InlineKeyboardButton(f"سین {c(s.get('is_seen_on'))}", callback_data=f"axp:seen:{uid}")
-    )
-    kb.row(
-        types.InlineKeyboardButton(f"تایپ {c(s.get('is_typing_on'))}", callback_data=f"axp:typing:{uid}"),
-        types.InlineKeyboardButton(f"بازی {c(s.get('action_mode')=='game')}", callback_data=f"axp:action:{uid}")
-    )
-    kb.row(types.InlineKeyboardButton(f"ذخیره خودکار {c(s.get('auto_save'))}", callback_data=f"axp:autosave:{uid}"))
-    kb.row(types.InlineKeyboardButton(f"سپر ضد ریپ {c(s.get('anti_report',1))}", callback_data=f"axp:antireport:{uid}"))
-    kb.row(
-        types.InlineKeyboardButton(f"دشمن {c(s.get('enemy_active'))}", callback_data=f"axp:enemy:{uid}"),
-        types.InlineKeyboardButton(f"دوست {c(s.get('friend_active'))}", callback_data=f"axp:friend:{uid}"),
-        types.InlineKeyboardButton(f"کراش {c(s.get('crash_active'))}", callback_data=f"axp:crash:{uid}")
+        _btn(f"منشی {c(s.get('is_auto_reply_on'))}", style=st(s.get('is_auto_reply_on')), callback_data=f"axp:reply:{uid}"),
+        _btn(f"سین {c(s.get('is_seen_on'))}", style=st(s.get('is_seen_on')), callback_data=f"axp:seen:{uid}")
     )
     kb.row(
-        types.InlineKeyboardButton(f"📢 تبچی {c(s.get('poster_on'))}", callback_data=f"axp:poster:{uid}"),
-        types.InlineKeyboardButton("🗑 پاکسازی تبچی", callback_data=f"axp:posterclear:{uid}")
+        _btn(f"تایپ {c(s.get('is_typing_on'))}", style=st(s.get('is_typing_on')), callback_data=f"axp:typing:{uid}"),
+        _btn(f"بازی {c(s.get('action_mode')=='game')}", style=st(s.get('action_mode')=='game'), callback_data=f"axp:action:{uid}")
     )
-    kb.row(types.InlineKeyboardButton(f"🔒 قفل کل پیوی {c(s.get('pv_lock'))}", callback_data=f"axp:pvlock:{uid}"))
-    kb.row(types.InlineKeyboardButton("🔻 قفل‌های رسانه پیوی 🔻", callback_data="axp:none:"+str(uid)))
+    kb.row(_btn(f"ذخیره خودکار {c(s.get('auto_save'))}", style=st(s.get('auto_save')), callback_data=f"axp:autosave:{uid}"))
+    kb.row(_btn(f"سپر ضد ریپ {c(s.get('anti_report',1))}", style=st(s.get('anti_report',1)), callback_data=f"axp:antireport:{uid}"))
     kb.row(
-        types.InlineKeyboardButton(f"عکس {c(s.get('pv_photo'))}", callback_data=f"axp:media_photo:{uid}"),
-        types.InlineKeyboardButton(f"ویدیو {c(s.get('pv_video'))}", callback_data=f"axp:media_video:{uid}"),
-        types.InlineKeyboardButton(f"گیف {c(s.get('pv_gif'))}", callback_data=f"axp:media_gif:{uid}")
+        _btn(f"دشمن {c(s.get('enemy_active'))}", style=st(s.get('enemy_active')), callback_data=f"axp:enemy:{uid}"),
+        _btn(f"دوست {c(s.get('friend_active'))}", style=st(s.get('friend_active')), callback_data=f"axp:friend:{uid}"),
+        _btn(f"کراش {c(s.get('crash_active'))}", style=st(s.get('crash_active')), callback_data=f"axp:crash:{uid}")
     )
     kb.row(
-        types.InlineKeyboardButton(f"ویس {c(s.get('pv_voice'))}", callback_data=f"axp:media_voice:{uid}"),
-        types.InlineKeyboardButton(f"موزیک {c(s.get('pv_music'))}", callback_data=f"axp:media_music:{uid}"),
-        types.InlineKeyboardButton(f"استیکر {c(s.get('pv_sticker'))}", callback_data=f"axp:media_sticker:{uid}")
+        _btn(f"📢 تبچی {c(s.get('poster_on'))}", style=st(s.get('poster_on')), callback_data=f"axp:poster:{uid}"),
+        _btn("🗑 پاکسازی تبچی", style="danger", callback_data=f"axp:posterclear:{uid}")
     )
-    kb.row(types.InlineKeyboardButton(f"فایل {c(s.get('pv_doc'))}", callback_data=f"axp:media_doc:{uid}"))
+    kb.row(_btn(f"🔒 قفل کل پیوی {c(s.get('pv_lock'))}", style=st(s.get('pv_lock')), callback_data=f"axp:pvlock:{uid}"))
+    kb.row(_btn("🔻 قفل‌های رسانه پیوی 🔻", style="primary", callback_data="axp:none:"+str(uid)))
     kb.row(
-        types.InlineKeyboardButton("📊 وضعیت سلف", callback_data=f"axp:status:{uid}"),
-        types.InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"axp:refresh:{uid}")
+        _btn(f"عکس {c(s.get('pv_photo'))}", style=st(s.get('pv_photo')), callback_data=f"axp:media_photo:{uid}"),
+        _btn(f"ویدیو {c(s.get('pv_video'))}", style=st(s.get('pv_video')), callback_data=f"axp:media_video:{uid}"),
+        _btn(f"گیف {c(s.get('pv_gif'))}", style=st(s.get('pv_gif')), callback_data=f"axp:media_gif:{uid}")
     )
-    kb.row(types.InlineKeyboardButton("❌ بستن پنل", callback_data=f"axp:close:{uid}"))
+    kb.row(
+        _btn(f"ویس {c(s.get('pv_voice'))}", style=st(s.get('pv_voice')), callback_data=f"axp:media_voice:{uid}"),
+        _btn(f"موزیک {c(s.get('pv_music'))}", style=st(s.get('pv_music')), callback_data=f"axp:media_music:{uid}"),
+        _btn(f"استیکر {c(s.get('pv_sticker'))}", style=st(s.get('pv_sticker')), callback_data=f"axp:media_sticker:{uid}")
+    )
+    kb.row(_btn(f"فایل {c(s.get('pv_doc'))}", style=st(s.get('pv_doc')), callback_data=f"axp:media_doc:{uid}"))
+    kb.row(
+        _btn("📊 وضعیت سلف", style="primary", callback_data=f"axp:status:{uid}"),
+        _btn("🔄 بروزرسانی", style="primary", callback_data=f"axp:refresh:{uid}")
+    )
+    kb.row(_btn("🔙 بازگشت", style="danger", callback_data=f"axp:backtomenu:{uid}"))
     return kb
 
 def ax_panel_text(uid):
-    s = get_self_settings(uid)
     return (
         "⚡️ <b>مدیریت پیشرفته سلف بات</b>\n"
-        f"👤 کاربر: <code>{uid}</code>\n\n"
-        "📡 وضعیت اتصال: <b>برقرار ✅</b>\n"
-        f"⏰ ساعت: {'روشن ✅' if s.get('is_clock_on') else 'خاموش ❌'}\n"
-        f"🔤 فونت ساعت/اسم: <b>{s.get('font_style','font1')}</b>\n"
-        f"📝 حالت متن: <b>{s.get('text_mode','normal')}</b>\n"
-        f"🤖 منشی: {'روشن ✅' if s.get('is_auto_reply_on') else 'خاموش ❌'}\n"
-        f"👁 سین: {'روشن ✅' if s.get('is_seen_on') else 'خاموش ❌'}\n"
-        f"⌨️ تایپ: {'روشن ✅' if s.get('is_typing_on') else 'خاموش ❌'}\n"
-        f"🛡 سپر ضد ریپ: {'روشن ✅' if s.get('anti_report',1) else 'خاموش ❌'}\n"
-        f"👤 دشمن/دوست/کراش: {'روشن' if s.get('enemy_active') or s.get('friend_active') or s.get('crash_active') else 'خاموش'}\n"
-        f"📢 تبچی گروهی: {'روشن ✅' if s.get('poster_on') else 'خاموش ❌'}\n"
-        f"🔒 قفل پیوی: {'روشن ✅' if s.get('pv_lock') else 'خاموش ❌'}"
+        f"👤 کاربر: <code>{uid}</code>"
     )
+
+def _push_view(c, text, markup, photo_id=None):
+    """نمایش یک صفحه (کوچک یا بزرگ) روی همون تعامل: اگر inline بود با ادیت (کپشن یا متن)،
+    اگر پیام معمولی بود با حذف + ارسال دوباره (با همون عکس در صورت وجود)."""
+    if c.inline_message_id:
+        try:
+            bot.edit_message_caption(text, inline_message_id=c.inline_message_id, reply_markup=markup, parse_mode="HTML")
+            return
+        except Exception:
+            pass
+        try:
+            bot.edit_message_text(text, inline_message_id=c.inline_message_id, reply_markup=markup, parse_mode="HTML")
+        except Exception:
+            try:
+                bot.edit_message_reply_markup(inline_message_id=c.inline_message_id, reply_markup=markup)
+            except Exception:
+                pass
+    else:
+        chat_id = c.message.chat.id
+        try:
+            bot.delete_message(chat_id, c.message.message_id)
+        except Exception:
+            pass
+        if photo_id:
+            try:
+                bot.send_photo(chat_id, photo_id, caption=text, reply_markup=markup, parse_mode="HTML")
+                return
+            except Exception:
+                pass
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
+
+def _edit_big_panel_inplace(c, uid):
+    """بعد از هر تغییر (روشن/خاموش کردن قابلیت) همون پیام پنل بزرگ رو در جا آپدیت می‌کند،
+    بدون حذف عکس زمینه (در صورت وجود)."""
+    text = ax_panel_text(uid)
+    markup = generate_ax_panel_markup(uid)
+    if c.inline_message_id:
+        try:
+            bot.edit_message_caption(text, inline_message_id=c.inline_message_id, reply_markup=markup, parse_mode="HTML")
+            return
+        except Exception:
+            pass
+        try:
+            bot.edit_message_text(text, inline_message_id=c.inline_message_id, reply_markup=markup, parse_mode="HTML")
+        except Exception:
+            try:
+                bot.edit_message_reply_markup(inline_message_id=c.inline_message_id, reply_markup=markup)
+            except Exception:
+                pass
+    else:
+        if getattr(c.message, "photo", None):
+            try:
+                bot.edit_message_caption(text, c.message.chat.id, c.message.message_id, reply_markup=markup, parse_mode="HTML")
+                return
+            except Exception:
+                pass
+        try:
+            bot.edit_message_text(text, c.message.chat.id, c.message.message_id, reply_markup=markup, parse_mode="HTML")
+        except Exception:
+            try:
+                bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=markup)
+            except Exception:
+                pass
 
 @bot.inline_handler(lambda q: (q.query or '').strip().lower() in ('panel', 'پنل', 'menu', 'منو'))
 def ax_inline_panel(q):
@@ -833,12 +911,25 @@ def ax_inline_panel(q):
             q.id, [], cache_time=0, is_personal=True,
             switch_pm_text="ابتدا سلف را فعال کنید", switch_pm_parameter="start"
         )
+    markup = self_iran_menu_markup(uid)
+    photo_id = get_setting("self_panel_photo")
+    if photo_id:
+        try:
+            result = types.InlineQueryResultCachedPhoto(
+                id=f"ax_menu_{uid}_{int(time.time()*1000)}",
+                photo_file_id=photo_id,
+                caption=SELF_IRAN_MENU_CAPTION,
+                reply_markup=markup
+            )
+            return bot.answer_inline_query(q.id, [result], cache_time=0, is_personal=True)
+        except Exception:
+            pass
     result = types.InlineQueryResultArticle(
-        id=f"ax_panel_{uid}_{int(time.time()*1000)}",
-        title="🧊 پنل شیشه‌ای سلف",
-        description="پنل حرفه‌ای دستورات سلف",
-        input_message_content=types.InputTextMessageContent(ax_panel_text(uid), parse_mode="HTML"),
-        reply_markup=generate_ax_panel_markup(uid)
+        id=f"ax_menu_{uid}_{int(time.time()*1000)}",
+        title="✨ منوی self Iran",
+        description="مدیریت سلف بات",
+        input_message_content=types.InputTextMessageContent(SELF_IRAN_MENU_CAPTION),
+        reply_markup=markup
     )
     bot.answer_inline_query(q.id, [result], cache_time=0, is_personal=True)
 
@@ -946,16 +1037,11 @@ def ax_panel_callback(c):
                 try: bot.delete_message(c.message.chat.id, c.message.message_id)
                 except Exception: pass
             return bot.answer_callback_query(c.id)
+        elif action == "backtomenu":
+            _push_view(c, SELF_IRAN_MENU_CAPTION, self_iran_menu_markup(uid), photo_id=get_setting("self_panel_photo"))
+            return bot.answer_callback_query(c.id)
 
-        try:
-            bot.edit_message_text(ax_panel_text(uid), inline_message_id=c.inline_message_id,
-                                  reply_markup=generate_ax_panel_markup(uid), parse_mode="HTML")
-        except Exception:
-            try:
-                bot.edit_message_reply_markup(inline_message_id=c.inline_message_id,
-                                              reply_markup=generate_ax_panel_markup(uid))
-            except Exception:
-                pass
+        _edit_big_panel_inplace(c, uid)
         bot.answer_callback_query(c.id, "✅ انجام شد")
     except Exception as e:
         logging.exception("AX/CIP panel callback error")
@@ -1690,13 +1776,62 @@ async def self_panel_command_controller(client, message):
         try: await message.reply(f"❌ باز کردن پنل ناموفق بود: {e}")
         except Exception: pass
 
+SELF_IRAN_MENU_CAPTION = "منوی self Iran 👤"
+
+def self_iran_menu_markup(uid):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        _btn("❌ بستن پنل", style="danger", callback_data=f"smenu:close:{uid}"),
+        _btn("⚙️ مدیریت سلف", style="success", callback_data=f"smenu:manage:{uid}")
+    )
+    return kb
+
+def _send_self_iran_menu(chat_id, uid):
+    photo_id = get_setting("self_panel_photo")
+    markup = self_iran_menu_markup(uid)
+    if photo_id:
+        try:
+            bot.send_photo(chat_id, photo_id, caption=SELF_IRAN_MENU_CAPTION, reply_markup=markup)
+            return
+        except Exception:
+            pass
+    bot.send_message(chat_id, SELF_IRAN_MENU_CAPTION, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("smenu:"))
+def cb_self_iran_menu(c: types.CallbackQuery):
+    parts = c.data.split(":")
+    action = parts[1]
+    uid = int(parts[2])
+    if c.from_user.id != uid:
+        return bot.answer_callback_query(c.id, "⛔️ این پنل برای شما نیست.", show_alert=True)
+    if action == "close":
+        if c.inline_message_id:
+            try:
+                bot.edit_message_caption("❌ پنل بسته شد.", inline_message_id=c.inline_message_id)
+            except Exception:
+                try:
+                    bot.edit_message_text("❌ پنل بسته شد.", inline_message_id=c.inline_message_id)
+                except Exception:
+                    pass
+        else:
+            try:
+                bot.delete_message(c.message.chat.id, c.message.message_id)
+            except Exception:
+                pass
+        return bot.answer_callback_query(c.id)
+    elif action == "manage":
+        if not is_self_active(uid):
+            return bot.answer_callback_query(c.id, "❌ سلف شما فعال نیست.", show_alert=True)
+        _push_view(c, ax_panel_text(uid), generate_ax_panel_markup(uid), photo_id=get_setting("self_panel_photo"))
+        return bot.answer_callback_query(c.id)
+
 @bot.message_handler(func=lambda m: in_private(m) and m.text and m.text.strip().lower() in ("پنل", "/panel"))
 def cmd_panel(m: types.Message):
     uid = m.from_user.id
     ensure_user(uid)
     if not is_self_active(uid):
         return bot.send_message(m.chat.id, "❌ سلف شما فعال نیست.\nابتدا سلف را فعال کنید.")
-    bot.send_message(m.chat.id, ax_panel_text(uid), reply_markup=generate_ax_panel_markup(uid), parse_mode="HTML")
+    _send_self_iran_menu(m.chat.id, uid)
 
 @bot.message_handler(
     func=lambda m: (
@@ -1894,21 +2029,32 @@ def handle_reply_text(m):
 
 # ----------------- PROFILE -----------------
 @bot.message_handler(func=lambda m: in_private(m) and m.text and m.text.strip() == "≼ پروفایل 👤 ≽")
-def cmd_profile(m: types.Message):
+def cmd_profile(m: types.Message, with_back=False):
     user_id = m.from_user.id
     ensure_user(user_id)
     bal = get_balance(user_id)
     is_active = is_self_active(user_id)
-    
+
     text = f"👤 پروفایل شما:\n\n"
+    text += f"👤 آیدی عددی شما: {user_id}\n"
     text += f"💎 الماس: {bal}\n"
     text += f"💰 تومان: {bal * DIAMOND_RATE:,}\n"
     text += f"🔐 وضعیت سلف: {'✅ فعال' if is_active else '❌ غیرفعال'}\n"
     text += f"👥 تعداد دعوت‌ها: {get_ref_count(user_id)}"
-    
-    bot.send_message(m.chat.id, text)
+
+    kb = _back_markup() if with_back else None
+    bot.send_message(m.chat.id, text, reply_markup=kb)
 
 # ----------------- TRANSFER -----------------
+def transfer_receipt_markup(sender_disp, receiver_id, amount, tax, received):
+    kb = types.InlineKeyboardMarkup()
+    kb.row(types.InlineKeyboardButton(f"👤 {sender_disp}", callback_data="noop:x"))
+    kb.row(types.InlineKeyboardButton(f"👥 {receiver_id}", callback_data="noop:x"))
+    kb.row(types.InlineKeyboardButton(f"💵 {amount}", callback_data="noop:x"))
+    kb.row(types.InlineKeyboardButton(f"🧾 {tax}", callback_data="noop:x"))
+    kb.row(types.InlineKeyboardButton(f"✅ {received}", callback_data="noop:x"))
+    return kb
+
 @bot.message_handler(func=lambda message: message.text and message.text.startswith("انتقال"))
 def transfer_diamonds(message):
     if message.chat.type not in ["group", "supergroup"]:
@@ -1952,14 +2098,15 @@ def transfer_diamonds(message):
         change_balance(receiver_id, amount)
         sender_name = message.from_user.username or message.from_user.first_name or f"مالک"
         receipt = (
-            f"💎 رسید انتقال الماس\n"
-            f"👤 فرستنده: <b>{sender_name} (مالک)</b>\n"
-            f"👥 گیرنده: <code>{receiver_id}</code>\n"
-            f"💵 مبلغ ارسال: {amount}\n"
-            f"🧾 مالیات: {tax}\n"
-            f"✅ مبلغ دریافتی گیرنده: {amount}"
+            "💎 رسید انتقال الماس\n"
+            "👤 فرستنده\n"
+            "👥 گیرنده\n"
+            "💵 مبلغ ارسال\n"
+            "🧾 مالیات\n"
+            "✅ مبلغ دریافتی گیرنده"
         )
-        bot.reply_to(message, receipt, parse_mode="HTML")
+        kb = transfer_receipt_markup(f"{sender_name} (مالک)", receiver_id, amount, tax, amount)
+        bot.reply_to(message, receipt, reply_markup=kb)
         try:
             bot.send_message(
                 receiver_id,
@@ -1984,14 +2131,15 @@ def transfer_diamonds(message):
     sender_name = message.from_user.username or message.from_user.first_name or f"کاربر {sender_id}"
 
     receipt = (
-        f"💎 رسید انتقال الماس\n"
-        f"👤 فرستنده: <b>{sender_name}</b>\n"
-        f"👥 گیرنده: <code>{receiver_id}</code>\n"
-        f"💵 مبلغ ارسال: {amount}\n"
-        f"🧾 مالیات از فرستنده: {tax}\n"
-        f"✅ مبلغ دریافتی گیرنده: {amount}"
+        "💎 رسید انتقال الماس\n"
+        "👤 فرستنده\n"
+        "👥 گیرنده\n"
+        "💵 مبلغ ارسال\n"
+        "🧾 مالیات\n"
+        "✅ مبلغ دریافتی گیرنده"
     )
-    bot.reply_to(message, receipt, parse_mode="HTML")
+    kb = transfer_receipt_markup(sender_name, receiver_id, amount, tax, amount)
+    bot.reply_to(message, receipt, reply_markup=kb)
 
     try:
         bot.send_message(
@@ -2016,18 +2164,27 @@ BET_OPEN_TEXT = (
 BET_RESULT_TEXT = (
     "◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈\n"
     "نتیجه شرطبندی:\n"
-    "🏆 برنده: {winner}\n"
-    "💀 بازنده: {loser}\n"
-    "💎 جایزه: {prize}\n"
-    "🧾 مالیات: {tax}\n"
+    "🏆 برنده\n"
+    "💀 بازنده\n"
+    "💎 جایزه\n"
+    "🧾 مالیات\n"
     "◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈"
 )
+
+def bet_result_markup(winner_disp, loser_disp, prize, tax):
+    """دکمه‌های فیک (بدون عملکرد) که فقط مقدار واقعی هر ردیف نتیجه را نشان می‌دهند."""
+    kb = types.InlineKeyboardMarkup()
+    kb.row(types.InlineKeyboardButton(f"🏆 {winner_disp}", callback_data="noop:x"))
+    kb.row(types.InlineKeyboardButton(f"💀 {loser_disp}", callback_data="noop:x"))
+    kb.row(types.InlineKeyboardButton(f"💎 {prize}", callback_data="noop:x"))
+    kb.row(types.InlineKeyboardButton(f"🧾 {tax}", callback_data="noop:x"))
+    return kb
 
 def bet_keyboard(bet_id: int, creator_id: int):
     kb = types.InlineKeyboardMarkup()
     kb.add(
-        types.InlineKeyboardButton("لغو ❌", callback_data=f"bet:cancel:{bet_id}:{creator_id}"),
-        types.InlineKeyboardButton("پیوستن ✅", callback_data=f"bet:join:{bet_id}")
+        _btn("لغو ❌", style="danger", callback_data=f"bet:cancel:{bet_id}:{creator_id}"),
+        _btn("پیوستن ✅", style="success", callback_data=f"bet:join:{bet_id}")
     )
     return kb
 
@@ -2063,21 +2220,25 @@ def cmd_bet(m):
     text = BET_OPEN_TEXT.format(amount=amount, creator=user_display_from_id(user_id))
     kb = bet_keyboard(bet_id, user_id)
 
-    msg = bot.send_message(m.chat.id, text, reply_markup=kb, reply_to_message_id=m.message_id)
+    bet_photo = get_setting("game_photo")
+    is_photo = 0
+    if bet_photo:
+        try:
+            msg = bot.send_photo(m.chat.id, bet_photo, caption=text, reply_markup=kb, reply_to_message_id=m.message_id)
+            is_photo = 1
+        except Exception:
+            msg = bot.send_message(m.chat.id, text, reply_markup=kb, reply_to_message_id=m.message_id)
+    else:
+        msg = bot.send_message(m.chat.id, text, reply_markup=kb, reply_to_message_id=m.message_id)
 
     with db_lock:
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
-            cur.execute("UPDATE bets SET message_id=? WHERE bet_id=?", (msg.message_id, bet_id))
+            cur.execute("UPDATE bets SET message_id=?, is_photo=? WHERE bet_id=?", (msg.message_id, is_photo, bet_id))
             conn.commit()
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("bet:"))
 def cb_bet(c):
-    try:
-        bot.answer_callback_query(c.id)
-    except:
-        pass
-
     try:
         parts = c.data.split(":")
         action = parts[1]
@@ -2093,18 +2254,18 @@ def cb_bet(c):
         with db_lock:
             with sqlite3.connect(DB_PATH) as conn:
                 cur = conn.cursor()
-                cur.execute("SELECT creator_id, amount, state, player_joined_id, message_id FROM bets WHERE bet_id=?", (bet_id,))
+                cur.execute("SELECT creator_id, amount, state, player_joined_id, message_id, is_photo FROM bets WHERE bet_id=?", (bet_id,))
                 row = cur.fetchone()
 
         if not row:
             return bot.answer_callback_query(c.id, "شرط پیدا نشد.")
 
-        creator_id, amount, state, joined_id, message_id = row
+        creator_id, amount, state, joined_id, message_id, is_photo = row
         user_id = c.from_user.id
 
         if action == "cancel":
             if user_id != creator_id:
-                return bot.answer_callback_query(c.id, "فقط سازنده می‌تواند لغو کند.")
+                return bot.answer_callback_query(c.id, "این شرط‌بندی برای شما نیست", show_alert=True)
             if state != "open":
                 return bot.answer_callback_query(c.id, "این شرط قبلاً بسته شده است.")
 
@@ -2117,12 +2278,12 @@ def cb_bet(c):
                     conn.commit()
 
             try:
-                bot.edit_message_text("❌ این شرط توسط سازنده لغو شد.", c.message.chat.id, message_id)
-            except Exception:
-                try:
+                if is_photo:
+                    bot.edit_message_caption("❌ این شرط توسط سازنده لغو شد.", c.message.chat.id, message_id, reply_markup=None)
+                else:
                     bot.edit_message_text("❌ این شرط توسط سازنده لغو شد.", c.message.chat.id, message_id)
-                except:
-                    pass
+            except Exception:
+                pass
 
             return bot.answer_callback_query(c.id, "شرط لغو شد.")
 
@@ -2130,11 +2291,11 @@ def cb_bet(c):
             with db_lock:
                 with sqlite3.connect(DB_PATH) as conn:
                     cur = conn.cursor()
-                    cur.execute("SELECT creator_id, amount, state, player_joined_id, message_id FROM bets WHERE bet_id=?", (bet_id,))
+                    cur.execute("SELECT creator_id, amount, state, player_joined_id, message_id, is_photo FROM bets WHERE bet_id=?", (bet_id,))
                     row2 = cur.fetchone()
             if not row2:
                 return bot.answer_callback_query(c.id, "شرط پیدا نشد.")
-            creator_id, amount, state, joined_id, message_id = row2
+            creator_id, amount, state, joined_id, message_id, is_photo = row2
 
             if state != "open":
                 return bot.answer_callback_query(c.id, "این شرط بسته شده است.")
@@ -2145,7 +2306,7 @@ def cb_bet(c):
 
             bal = get_balance(user_id)
             if bal < amount:
-                return bot.answer_callback_query(c.id, "موجودی کافی ندارید.")
+                return bot.answer_callback_query(c.id, "موجودی شما کافی نیست", show_alert=True)
 
             change_balance(user_id, -amount)
 
@@ -2163,19 +2324,19 @@ def cb_bet(c):
                     cur.execute("UPDATE bets SET state='closed', player_joined_id=? WHERE bet_id=?", (user_id, bet_id))
                     conn.commit()
 
-            text = BET_RESULT_TEXT.format(
-                winner=user_display_from_id(winner_id),
-                loser=user_display_from_id(loser_id),
-                prize=prize,
-                tax=tax
+            result_markup = bet_result_markup(
+                user_display_from_id(winner_id),
+                user_display_from_id(loser_id),
+                prize,
+                tax
             )
             try:
-                bot.edit_message_text(text, c.message.chat.id, message_id)
+                if is_photo:
+                    bot.edit_message_caption(BET_RESULT_TEXT, c.message.chat.id, message_id, reply_markup=result_markup)
+                else:
+                    bot.edit_message_text(BET_RESULT_TEXT, c.message.chat.id, message_id, reply_markup=result_markup)
             except Exception:
-                try:
-                    bot.edit_message_text(text, c.message.chat.id, message_id)
-                except:
-                    pass
+                pass
 
             return bot.answer_callback_query(c.id, "شرطبندی انجام شد!")
 
@@ -2222,6 +2383,8 @@ def admin_main_markup(uid):
     )
     kb.row(types.InlineKeyboardButton("🎲 وضعیت شرط‌بندی", callback_data="admin:bets"))
     kb.row(types.InlineKeyboardButton("🖼 تنظیم عکس استارت", callback_data="admin:set_start_photo"))
+    kb.row(types.InlineKeyboardButton("🎲 تنظیم عکس شرط‌بندی", callback_data="admin:set_bet_photo"))
+    kb.row(types.InlineKeyboardButton("👤 تنظیم عکس پنل سلف", callback_data="admin:set_self_panel_photo"))
     kb.row(types.InlineKeyboardButton("❌ بستن", callback_data="admin:close"))
     return kb
 
@@ -2323,6 +2486,20 @@ def cb_admin(c):
             c.message.chat.id,c.message.message_id,
             reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back"))
         )
+    if action=="set_bet_photo":
+        ADMIN_STATE[uid]="set_bet_photo"
+        return bot.edit_message_text(
+            "🎲 یک عکس بفرستید تا برای پیام‌های شرط‌بندی و موجودی استفاده شود.",
+            c.message.chat.id,c.message.message_id,
+            reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back"))
+        )
+    if action=="set_self_panel_photo":
+        ADMIN_STATE[uid]="set_self_panel_photo"
+        return bot.edit_message_text(
+            "👤 یک عکس بفرستید تا برای پنل «منوی self Iran» (دستور «پنل») استفاده شود.",
+            c.message.chat.id,c.message.message_id,
+            reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back"))
+        )
     if action=="back":
         return bot.edit_message_text("⚙️ <b>پنل مدیریت CIP</b>", c.message.chat.id, c.message.message_id, reply_markup=admin_main_markup(uid), parse_mode="HTML")
     if action=="close":
@@ -2389,6 +2566,22 @@ def admin_state_handler(m: types.Message):
         set_setting("start_photo", file_id)
         ADMIN_STATE.pop(uid,None)
         bot.reply_to(m,"✅ عکس پنل اصلی استارت ذخیره شد.")
+
+    elif state=="set_bet_photo":
+        if m.content_type != "photo" or not m.photo:
+            return bot.reply_to(m,"❌ لطفاً یک عکس ارسال کنید.")
+        file_id = m.photo[-1].file_id
+        set_setting("game_photo", file_id)
+        ADMIN_STATE.pop(uid,None)
+        bot.reply_to(m,"✅ عکس شرط‌بندی ذخیره شد.")
+
+    elif state=="set_self_panel_photo":
+        if m.content_type != "photo" or not m.photo:
+            return bot.reply_to(m,"❌ لطفاً یک عکس ارسال کنید.")
+        file_id = m.photo[-1].file_id
+        set_setting("self_panel_photo", file_id)
+        ADMIN_STATE.pop(uid,None)
+        bot.reply_to(m,"✅ عکس پنل سلف ذخیره شد.")
 
 @bot.message_handler(commands=['give'])
 def cmd_give(m: types.Message):
@@ -2474,16 +2667,28 @@ FREE_DIAMOND_TEXT = (
     "🔗 لینک دعوت: {link}"
 )
 
-BALANCE_TEXT = "💎 موجودی شما:\nالماس 💎: {diamonds}\nبه تومان: {toman:,}"
+BALANCE_TEXT = "💎 موجودی شما:"
+
+def balance_markup(diamonds, toman):
+    try:
+        toman_disp = f"{toman:,}"
+    except (ValueError, TypeError):
+        toman_disp = str(toman)
+    kb = types.InlineKeyboardMarkup()
+    kb.row(types.InlineKeyboardButton(f"💎 {diamonds}", callback_data="noop:x"))
+    kb.row(types.InlineKeyboardButton(f"💰 {toman_disp} تومان", callback_data="noop:x"))
+    return kb
 
 @bot.message_handler(func=lambda m: isinstance(m.text, str) and m.text.strip() == "موجودی")
 def cmd_balance(m: types.Message):
     user_id = m.from_user.id
     if is_owner(user_id):
-        text = "💎 موجودی شما:\nالماس 💎: ∞\nبه تومان: ∞"
-        return bot.reply_to(m, text)
+        text = "💎 موجودی شما:"
+        kb = balance_markup("∞", "∞")
+        return bot.send_message(m.chat.id, text, reply_markup=kb, reply_to_message_id=m.message_id)
     bal = get_balance(user_id)
-    text = BALANCE_TEXT.format(diamonds=bal, toman=bal * DIAMOND_RATE)
+    text = BALANCE_TEXT
+    kb = balance_markup(bal, bal * DIAMOND_RATE)
     game_photo = get_setting("game_photo")
 
     if game_photo:
@@ -2492,12 +2697,13 @@ def cmd_balance(m: types.Message):
                 chat_id=m.chat.id,
                 photo=game_photo,
                 caption=text,
+                reply_markup=kb,
                 reply_to_message_id=m.message_id
             )
         except:
-            bot.reply_to(m, text)
+            bot.send_message(m.chat.id, text, reply_markup=kb, reply_to_message_id=m.message_id)
     else:
-        bot.reply_to(m, text)
+        bot.send_message(m.chat.id, text, reply_markup=kb, reply_to_message_id=m.message_id)
 
 # ----------------- MAIN -----------------
 def run_bot():
