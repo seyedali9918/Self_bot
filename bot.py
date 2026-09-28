@@ -497,6 +497,7 @@ def in_group(m): return m.chat.type in ("group","supergroup")
 # ----------------- START -----------------
 @bot.message_handler(commands=['start'])
 def cmd_start(m: types.Message):
+    TRANSFER_STATE.pop(m.from_user.id, None)
     args = m.text.split()
     inviter_id = None
     if len(args) > 1:
@@ -597,12 +598,119 @@ class _MenuCtx:
         self.message_id = None
         self.text = None
 
+# ---------- انتقال الماس داخل ربات (پیوی) ----------
+TRANSFER_STATE = {}  # uid -> {"receiver": int | None}
+
+TRANSFER_PROMPT_TEXT = (
+    "🔁 انتقال الماس\n\n"
+    "آیدی عددی گیرنده و مقدار الماس را بفرستید. به یکی از این دو روش:\n\n"
+    "1️⃣ هر دو کنار هم، مثل:\n"
+    "123456789 20\n\n"
+    "2️⃣ یا اول آیدی عددی گیرنده، بعد در پیام جدا مقدار الماس.\n\n"
+    "🧾 از هر انتقال ۵٪ مالیات روی مبلغ اضافه و از موجودی شما کسر می‌شود.\n"
+    "👤 آیدی عددی هر کاربر داخل «حساب کاربری» او نوشته شده است.\n"
+    "💡 داخل گروه‌ها هم با ریپلای و نوشتن «انتقال 20» می‌توانید انتقال بدهید."
+)
+
+def _norm_digits(s: str) -> str:
+    return s.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+
+def _user_exists(uid: int) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM users WHERE user_id=?", (uid,))
+        return cur.fetchone() is not None
+
+def _transfer_back_markup():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(_btn("🔙 بازگشت", style="danger", callback_data="mm:buy"))
+    return kb
+
+@bot.message_handler(func=lambda m: m.chat.type == "private" and m.from_user and m.from_user.id in TRANSFER_STATE
+                     and m.text and not m.text.startswith("/"))
+def transfer_input_handler(m: types.Message):
+    uid = m.from_user.id
+    st = TRANSFER_STATE.get(uid)
+    if st is None:
+        return
+    nums = re.findall(r"\d+", _norm_digits(m.text))
+    back = _transfer_back_markup()
+
+    receiver = st.get("receiver")
+    amount = None
+    if len(nums) >= 2:
+        receiver, amount = int(nums[0]), int(nums[1])
+    elif len(nums) == 1:
+        if receiver is None:
+            st["receiver"] = int(nums[0])
+            return bot.send_message(
+                m.chat.id,
+                f"✅ گیرنده ثبت شد: {nums[0]}\nحالا مقدار الماس را بفرستید:",
+                reply_markup=back
+            )
+        amount = int(nums[0])
+    else:
+        return bot.send_message(m.chat.id, "❌ لطفاً فقط عدد بفرستید (آیدی عددی گیرنده و مقدار الماس).", reply_markup=back)
+
+    if amount <= 0:
+        return bot.send_message(m.chat.id, "❌ مقدار الماس باید عدد مثبت باشد.", reply_markup=back)
+    if receiver == uid:
+        st["receiver"] = None
+        return bot.send_message(m.chat.id, "❌ نمی‌توانید به خودتان الماس بفرستید. آیدی گیرنده را دوباره بفرستید.", reply_markup=back)
+    if not _user_exists(receiver):
+        st["receiver"] = None
+        return bot.send_message(
+            m.chat.id,
+            "❌ این آیدی داخل ربات پیدا نشد. گیرنده باید حداقل یک‌بار ربات را استارت کرده باشد.\nآیدی گیرنده را دوباره بفرستید.",
+            reply_markup=back
+        )
+
+    if is_owner(uid):
+        tax = 0
+    else:
+        tax = int(amount * 0.05)
+        total_cost = amount + tax
+        bal = get_balance(uid)
+        if bal < total_cost:
+            return bot.send_message(
+                m.chat.id,
+                f"❌ موجودی کافی نیست.\nبرای انتقال {amount} الماس باید {total_cost} الماس داشته باشید (شامل مالیات ۵٪).\nموجودی شما: {bal}",
+                reply_markup=back
+            )
+        change_balance(uid, -total_cost)
+    change_balance(receiver, amount)
+    TRANSFER_STATE.pop(uid, None)
+
+    sender_name = m.from_user.username or m.from_user.first_name or f"کاربر {uid}"
+    if is_owner(uid):
+        sender_name = f"{sender_name} (مالک)"
+    receipt = (
+        "💎 رسید انتقال الماس\n"
+        "👤 فرستنده\n"
+        "👥 گیرنده\n"
+        "💵 مبلغ ارسال\n"
+        "🧾 مالیات\n"
+        "✅ مبلغ دریافتی گیرنده"
+    )
+    kb = transfer_receipt_markup(sender_name, receiver, amount, tax, amount)
+    kb.row(_btn("🔙 بازگشت", style="danger", callback_data="mm:buy"))
+    bot.send_message(m.chat.id, receipt, reply_markup=kb)
+    try:
+        bot.send_message(
+            receiver,
+            f"🎉 تبریک!\nشما <b>{amount}</b> الماس از <b>{html.escape(str(sender_name))}</b> دریافت کردید.",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("mm:"))
 def cb_main_menu(c: types.CallbackQuery):
     action = c.data.split(":", 1)[1]
     chat_id = c.message.chat.id
     ctx = _MenuCtx(c.message.chat, c.from_user)
     bot.answer_callback_query(c.id)
+    TRANSFER_STATE.pop(c.from_user.id, None)
     try:
         bot.delete_message(chat_id, c.message.message_id)
     except Exception:
@@ -616,7 +724,14 @@ def cb_main_menu(c: types.CallbackQuery):
         link = f"https://t.me/{BOT_USERNAME}?start={c.from_user.id}"
         bot.send_message(chat_id, FREE_DIAMOND_TEXT.format(count=count, link=link), reply_markup=_back_markup())
     elif action == "buy":
-        bot.send_message(chat_id, "برای خرید به آیدی‌های زیر مراجعه کنید:\n👤 مالک: @AliZord_yt", reply_markup=_back_markup())
+        buy_kb = types.InlineKeyboardMarkup()
+        buy_kb.row(_btn("خرید الماس 💸", style="success", url="https://t.me/AliZord_yt"))
+        buy_kb.row(_btn("انتقال الماس 🔁", style="primary", callback_data="mm:transfer"))
+        buy_kb.row(_btn("🔙 بازگشت", style="danger", callback_data="mm:back"))
+        bot.send_message(chat_id, "برای خرید به آیدی‌ زیر مراجعه کنید:", reply_markup=buy_kb)
+    elif action == "transfer":
+        TRANSFER_STATE[c.from_user.id] = {"receiver": None}
+        bot.send_message(chat_id, TRANSFER_PROMPT_TEXT, reply_markup=_transfer_back_markup())
     elif action == "about":
         bot.send_message(chat_id, ABOUT_SELF_TEXT, reply_markup=_back_markup())
     elif action == "back":
@@ -2061,6 +2176,17 @@ def transfer_receipt_markup(sender_disp, receiver_id, amount, tax, received):
     kb.row(types.InlineKeyboardButton(f"✅ {received}", callback_data="noop:x"))
     return kb
 
+def _reply_transfer_receipt(message, receipt, kb):
+    """رسید انتقال داخل گروه؛ اگر ادمین عکس انتقال تنظیم کرده باشد، به‌صورت عکس + کپشن ارسال می‌شود."""
+    photo_id = get_setting("transfer_photo")
+    if photo_id:
+        try:
+            return bot.send_photo(message.chat.id, photo_id, caption=receipt, reply_markup=kb,
+                                  reply_to_message_id=message.message_id)
+        except Exception:
+            pass
+    return bot.reply_to(message, receipt, reply_markup=kb)
+
 @bot.message_handler(func=lambda message: message.text and message.text.startswith("انتقال"))
 def transfer_diamonds(message):
     if message.chat.type not in ["group", "supergroup"]:
@@ -2112,7 +2238,7 @@ def transfer_diamonds(message):
             "✅ مبلغ دریافتی گیرنده"
         )
         kb = transfer_receipt_markup(f"{sender_name} (مالک)", receiver_id, amount, tax, amount)
-        bot.reply_to(message, receipt, reply_markup=kb)
+        _reply_transfer_receipt(message, receipt, kb)
         try:
             bot.send_message(
                 receiver_id,
@@ -2145,7 +2271,7 @@ def transfer_diamonds(message):
         "✅ مبلغ دریافتی گیرنده"
     )
     kb = transfer_receipt_markup(sender_name, receiver_id, amount, tax, amount)
-    bot.reply_to(message, receipt, reply_markup=kb)
+    _reply_transfer_receipt(message, receipt, kb)
 
     try:
         bot.send_message(
@@ -2161,20 +2287,20 @@ MIN_BET = 20
 BET_TAX_PERCENT = 2
 
 BET_OPEN_TEXT = (
-    "◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈\n"
+    "◈ ━━━━ ˢᴱᴸᶠ ᴵᴿᴬᴺ ━━━━━ ◈\n"
     "شرطبندی باز شد:\n"
     "💎 الماس: {amount}\n"
     "👤 سازنده: {creator}\n"
-    "◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈"
+    "◈ ━━━━ ˢᴱᴸᶠ ᴵᴿᴬᴺ ━━━━━ ◈"
 )
 BET_RESULT_TEXT = (
-    "◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈\n"
+    "◈━━━━━━ ˢᴱᴸᶠ ᴵᴿᴬᴺ ━━━━━━ ◈\n"
     "نتیجه شرطبندی:\n"
     "🏆 برنده\n"
     "💀 بازنده\n"
     "💎 جایزه\n"
     "🧾 مالیات\n"
-    "◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈"
+    "◈━━━━━━ ˢᴱᴸᶠ ᴵᴿᴬᴺ ━━━━━━ ◈"
 )
 
 def bet_result_markup(winner_disp, loser_disp, prize, tax):
@@ -2308,7 +2434,7 @@ def cb_bet(c):
             if joined_id:
                 return bot.answer_callback_query(c.id, "یک نفر قبلاً پیوسته است.")
             if user_id == creator_id:
-                return bot.answer_callback_query(c.id, "نمی‌توانید روی شرط خودتان شرکت کنید.")
+                return bot.answer_callback_query(c.id, "نمی‌توانید توی شرط خودتان شرکت کنید.")
 
             bal = get_balance(user_id)
             if bal < amount:
@@ -2390,6 +2516,7 @@ def admin_main_markup(uid):
     kb.row(types.InlineKeyboardButton("🎲 وضعیت شرط‌بندی", callback_data="admin:bets"))
     kb.row(types.InlineKeyboardButton("🖼 تنظیم عکس استارت", callback_data="admin:set_start_photo"))
     kb.row(types.InlineKeyboardButton("🎲 تنظیم عکس شرط‌بندی", callback_data="admin:set_bet_photo"))
+    kb.row(types.InlineKeyboardButton("💎 تنظیم عکس انتقال گروه", callback_data="admin:set_transfer_photo"))
     kb.row(types.InlineKeyboardButton("👤 تنظیم عکس پنل سلف", callback_data="admin:set_self_panel_photo"))
     kb.row(types.InlineKeyboardButton("❌ بستن", callback_data="admin:close"))
     return kb
@@ -2492,6 +2619,13 @@ def cb_admin(c):
             c.message.chat.id,c.message.message_id,
             reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back"))
         )
+    if action=="set_transfer_photo":
+        ADMIN_STATE[uid]="set_transfer_photo"
+        return bot.edit_message_text(
+            "💎 یک عکس بفرستید تا برای رسید انتقال الماس داخل گروه‌ها استفاده شود.",
+            c.message.chat.id,c.message.message_id,
+            reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back"))
+        )
     if action=="set_bet_photo":
         ADMIN_STATE[uid]="set_bet_photo"
         return bot.edit_message_text(
@@ -2572,6 +2706,13 @@ def admin_state_handler(m: types.Message):
         set_setting("start_photo", file_id)
         ADMIN_STATE.pop(uid,None)
         bot.reply_to(m,"✅ عکس پنل اصلی استارت ذخیره شد.")
+
+    elif state=="set_transfer_photo":
+        if m.content_type != "photo" or not m.photo:
+            return bot.reply_to(m,"❌ لطفاً یک عکس ارسال کنید.")
+        set_setting("transfer_photo", m.photo[-1].file_id)
+        ADMIN_STATE.pop(uid,None)
+        bot.reply_to(m,"✅ عکس انتقال گروه ذخیره شد.")
 
     elif state=="set_bet_photo":
         if m.content_type != "photo" or not m.photo:
@@ -2668,7 +2809,7 @@ def private_menu(m: types.Message):
 # ----------------- BALANCE -----------------
 FREE_DIAMOND_TEXT = (
     "💎 با دعوت دوستان خود\n"
-    "50 الماس دریافت کنید..\n"
+    "40 الماس دریافت کنید.\n"
     "👥 کل دعوتی‌ها: {count}\n"
     "🔗 لینک دعوت: {link}"
 )
