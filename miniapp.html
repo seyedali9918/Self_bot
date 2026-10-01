@@ -163,6 +163,13 @@
       <div class="txt"><b>وضعیت سلف</b><span>روشن یا خاموش بودن</span></div>
       <div class="val" id="statusText">-</div>
     </div>
+    <div class="row" id="support">
+      <div class="ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13v-1a8 8 0 0 1 16 0v1"/><rect x="3" y="13" width="4" height="6" rx="2"/><rect x="17" y="13" width="4" height="6" rx="2"/><path d="M19 19c0 1.5-2 2.5-5 2.5"/></svg>
+      </div>
+      <div class="txt"><b>پشتیبانی</b><span>ارتباط با پشتیبان در تلگرام</span></div>
+      <div class="val">‹</div>
+    </div>
   </section>
 </div>
 <div class="toast" id="toast">شناسه کپی شد</div>
@@ -248,6 +255,12 @@ $('copyId').addEventListener('click', () => {
   const t = $('toast'); t.classList.add('show');
   tg?.HapticFeedback?.notificationOccurred('success');
   setTimeout(() => t.classList.remove('show'), 1400);
+});
+
+$('support').addEventListener('click', () => {
+  const url = 'https://t.me/AliZord_yt';
+  if (tg?.openTelegramLink) tg.openTelegramLink(url);
+  else window.open(url, '_blank');
 });
 
 load();
