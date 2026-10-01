@@ -223,10 +223,24 @@ async function load() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ initData: tg?.initData || '' })
       });
+      if (!r.ok) {
+        const msg = !tg?.initData
+          ? 'خطا: مینی‌اپ از داخل تلگرام باز نشده (initData خالی است)'
+          : 'خطا ' + r.status + ': ' + (await r.text()).slice(0, 80);
+        showError(msg);
+        return;
+      }
       data = await r.json();
-    } catch (e) { console.error(e); }
+    } catch (e) { showError('خطای اتصال به سرور'); console.error(e); return; }
   }
   renderData(data);
+}
+
+function showError(msg) {
+  const st = $('status');
+  st.className = 'status';
+  st.querySelector('span').textContent = msg;
+  $('statusText').textContent = '-';
 }
 
 $('copyId').addEventListener('click', () => {
