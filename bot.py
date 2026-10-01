@@ -2,6 +2,34 @@
 """
 VIP Bot v19 - نسخه ترکیبی ربات + یوزربات
 """
+import asyncio
+try:
+    _loop = asyncio.get_event_loop()
+    if _loop.is_closed():
+        raise RuntimeError("loop closed")
+except RuntimeError:
+    _loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_loop)
+
+import sqlite3
+import threading
+import html
+import logging
+import time
+import random
+import os
+import re
+import json
+import requests
+from datetime import datetime, timezone, timedelta
+
+import telebot
+from telebot import types
+from pyrogram import Client, filters, enums
+from pyrogram.types import Message as PyroMessage, InlineQueryResultArticle, InputTextMessageContent
+from pyrogram.errors import SessionPasswordNeeded, FloodWait
+from pyrogram.handlers import MessageHandler
+from pyrogram.raw.types import MessageEntityBlockquote, MessageEntityCustomEmoji, MessageEntitySpoiler
 import sqlite3
 import threading
 import html
@@ -21,7 +49,7 @@ from pyrogram import Client, filters, enums
 from pyrogram.types import Message as PyroMessage, InlineQueryResultArticle, InputTextMessageContent
 from pyrogram.errors import SessionPasswordNeeded, FloodWait
 from pyrogram.handlers import MessageHandler
-from pyrogram.raw.types import MessageEntityBlockquote
+from pyrogram.raw.types import MessageEntityBlockquote, MessageEntityCustomEmoji, MessageEntitySpoiler
 
 # ----------------- CONFIG -----------------
 BOT_TOKEN = "8200221816:AAEy7BSmi08HwAJY7QNLl9WdE6StI90LDqg"
@@ -684,17 +712,27 @@ def transfer_input_handler(m: types.Message):
     sender_name = m.from_user.username or m.from_user.first_name or f"کاربر {uid}"
     if is_owner(uid):
         sender_name = f"{sender_name} (مالک)"
+    try:
+        receiver_chat = bot.get_chat(receiver)
+        receiver_disp = _display_or_id(receiver_chat.username, receiver)
+    except Exception:
+        receiver_disp = str(receiver)
     receipt = (
-        "💎 رسید انتقال الماس\n"
-        "👤 فرستنده\n"
-        "👥 گیرنده\n"
-        "💵 مبلغ ارسال\n"
-        "🧾 مالیات\n"
-        "✅ مبلغ دریافتی گیرنده"
+        "✔️ انتقال الماس انجام شد.\n\n"
+        f"💎 {amount} الماس با موفقیت به {receiver_disp} انتقال داده شد.\n\n"
+        "موجودی جدید دو کاربر:"
     )
-    kb = transfer_receipt_markup(sender_name, receiver, amount, tax, amount)
+    kb = transfer_receipt_markup(sender_name, get_balance(uid), receiver_disp, get_balance(receiver))
     kb.row(_btn("🔙 بازگشت", style="danger", callback_data="mm:buy"))
-    bot.send_message(m.chat.id, receipt, reply_markup=kb)
+    photo_id = get_setting("transfer_photo")
+    sent = None
+    if photo_id:
+        try:
+            sent = bot.send_photo(m.chat.id, photo_id, caption=receipt, reply_markup=kb)
+        except Exception:
+            sent = None
+    if not sent:
+        bot.send_message(m.chat.id, receipt, reply_markup=kb)
     try:
         bot.send_message(
             receiver,
@@ -748,10 +786,33 @@ def cmd_self(m: types.Message, with_back=False):
 
     if is_self_active(uid):
         markup = types.InlineKeyboardMarkup()
-        markup.add(_btn("❌ حذف کردن سلف", style="danger", callback_data="self:deactivate"))
+        markup.add(_btn("⏸ خاموش کردن سلف", style="danger", callback_data="self:pause"))
+        markup.add(_btn("❌ حذف کامل سلف", style="danger", callback_data="self:deactivate"))
         if with_back:
             markup.add(_btn("🔙 بازگشت", style="primary", callback_data="mm:back"))
-        bot.send_message(m.chat.id, "✅ سلف شما فعال است!\nبرای غیر فعال کردن روی دکمه زیر کلیک کنید.", reply_markup=markup)
+        bot.send_message(
+            m.chat.id,
+            "✅ سلف شما فعال است!\n"
+            "⏸ خاموش کردن: نشست شما حفظ می‌شود، بعداً بدون لاگین دوباره روشن می‌شود.\n"
+            "❌ حذف کامل: باید دوباره با شماره تلفن لاگین کنید.",
+            reply_markup=markup
+        )
+        return
+
+    if SELF_CLIENTS.get(uid):
+        balance = get_balance(uid)
+        markup = types.InlineKeyboardMarkup()
+        markup.add(_btn(f"🔛 روشن کردن سلف ({ACTIVATE_COST} 💎)", style="success", callback_data="self:resume"))
+        markup.add(_btn("❌ حذف کامل سلف", style="danger", callback_data="self:deactivate"))
+        if with_back:
+            markup.add(_btn("🔙 بازگشت", style="primary", callback_data="mm:back"))
+        bot.send_message(
+            m.chat.id,
+            "⏸ سلف شما موقتاً خاموش است (نیازی به لاگین دوباره ندارید).\n"
+            f"💎 هزینه‌ی روشن کردن دوباره: {ACTIVATE_COST} الماس\n"
+            f"💎 موجودی شما: {balance} الماس",
+            reply_markup=markup
+        )
         return
 
     balance = get_balance(uid)
@@ -844,11 +905,8 @@ def handle_contact(m: types.Message):
                 "activation_paid": True
             }
 
-            bot.send_message(
-                uid,
-                "✅ کد تایید به تلگرام شما ارسال شد.\n📝 لطفاً کد ۵ رقمی را که از تلگرام دریافت کردید را با فاصله وارد کنید مثل  ( 5 4 6 1 2 ) :",
-                reply_markup=types.ReplyKeyboardRemove()
-            )
+            bot.send_message(uid, "✅ کد تایید به تلگرام شما ارسال شد.", reply_markup=types.ReplyKeyboardRemove())
+            _send_code_entry(uid)
         except FloodWait as e:
             # این محدودیت از سمت Telegram است و قابل دور زدن نیست.
             wait_seconds = int(getattr(e, "value", getattr(e, "x", 0)) or 0)
@@ -904,18 +962,12 @@ def generate_ax_panel_markup(uid):
     preview = format_clock_by_font("12:34", font)
     kb = types.InlineKeyboardMarkup(row_width=3)
     kb.row(
-        _btn(f"ساعت {c(s.get('is_clock_on'))}", style=st(s.get('is_clock_on')), callback_data=f"axp:clock:{uid}"),
-        _btn(f"بولد {c(s.get('bold_mode'))}", style=st(s.get('bold_mode')), callback_data=f"axp:bold:{uid}"),
-        _btn(f"نقل قول {c(s.get('text_mode')=='quote')}", style=st(s.get('text_mode')=='quote'), callback_data=f"axp:quote:{uid}")
+        _btn("⏰ ساعت و فونت", style="primary", callback_data=f"axp:sec_clock:{uid}"),
+        _btn("📝 حالت متن", style="primary", callback_data=f"axp:sec_textmode:{uid}")
     )
-    kb.row(_btn(f"تغییر فونت: {preview}", style="primary", callback_data=f"axp:font:{uid}"))
     kb.row(
         _btn(f"منشی {c(s.get('is_auto_reply_on'))}", style=st(s.get('is_auto_reply_on')), callback_data=f"axp:reply:{uid}"),
-        _btn(f"سین {c(s.get('is_seen_on'))}", style=st(s.get('is_seen_on')), callback_data=f"axp:seen:{uid}")
-    )
-    kb.row(
-        _btn(f"تایپ {c(s.get('is_typing_on'))}", style=st(s.get('is_typing_on')), callback_data=f"axp:typing:{uid}"),
-        _btn(f"بازی {c(s.get('action_mode')=='game')}", style=st(s.get('action_mode')=='game'), callback_data=f"axp:action:{uid}")
+        _btn("🎭 سین/تایپ/بازی", style="primary", callback_data=f"axp:sec_behavior:{uid}")
     )
     kb.row(_btn(f"ذخیره خودکار {c(s.get('auto_save'))}", style=st(s.get('auto_save')), callback_data=f"axp:autosave:{uid}"))
     kb.row(_btn(f"سپر ضد ریپ {c(s.get('anti_report',1))}", style=st(s.get('anti_report',1)), callback_data=f"axp:antireport:{uid}"))
@@ -947,6 +999,76 @@ def generate_ax_panel_markup(uid):
     )
     kb.row(_btn("🔙 بازگشت", style="danger", callback_data=f"axp:backtomenu:{uid}"))
     return kb
+
+def _sec_pair_style(is_on, this_is_on_button):
+    """برای جفت دکمه‌ی روشن/خاموش: هر کدوم که وضعیت فعلی رو نشون بده سبزه، اون یکی قرمز."""
+    active = is_on if this_is_on_button else (not is_on)
+    return "success" if active else "danger"
+
+def render_clock_section(uid):
+    s = get_self_settings(uid)
+    on = bool(s.get("is_clock_on"))
+    font = s.get("font_style", "font1")
+    preview = format_clock_by_font("12:34", font)
+    text = (
+        "⏰ <b>بخش ساعت و فونت</b>\n"
+        f"وضعیت فعلی: {'روشن ✅' if on else 'خاموش ❌'}\n"
+        f"فونت فعلی: <code>{preview}</code>"
+    )
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        _btn("روشن", style=_sec_pair_style(on, True), callback_data=f"axp:clockon:{uid}"),
+        _btn("خاموش", style=_sec_pair_style(on, False), callback_data=f"axp:clockoff:{uid}")
+    )
+    kb.row(_btn(f"تغییر فونت: {preview}", style="primary", callback_data=f"axp:font:{uid}"))
+    kb.row(_btn("🔙 بازگشت به پنل بزرگ", style="danger", callback_data=f"axp:sec_back:{uid}"))
+    return text, kb
+
+def render_textmode_section(uid):
+    s = get_self_settings(uid)
+    mode = s.get("text_mode", "normal")
+    text = (
+        "📝 <b>بخش حالت متن</b>\n"
+        f"وضعیت فعلی: <code>{mode}</code>\n\n"
+        "فقط یکی از این حالت‌ها می‌تواند فعال باشد."
+    )
+    def sty(m): return "success" if mode == m else "danger"
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        _btn("بولد", style=sty("bold"), callback_data=f"axp:bold:{uid}"),
+        _btn("نقل قول", style=sty("quote"), callback_data=f"axp:quote:{uid}"),
+        _btn("اسپویلر", style=sty("spoiler"), callback_data=f"axp:spoiler:{uid}")
+    )
+    kb.row(_btn("عادی (خاموش کردن همه)", style=sty("normal"), callback_data=f"axp:textnormal:{uid}"))
+    kb.row(_btn("🔙 بازگشت به پنل بزرگ", style="danger", callback_data=f"axp:sec_back:{uid}"))
+    return text, kb
+
+def render_behavior_section(uid):
+    s = get_self_settings(uid)
+    seen_on = bool(s.get("is_seen_on"))
+    if s.get("is_typing_on"):
+        mode = "typing"
+    elif s.get("action_mode") == "game":
+        mode = "game"
+    else:
+        mode = "none"
+    text = (
+        "🎭 <b>بخش سین / تایپ / بازی</b>\n"
+        f"سین: {'روشن ✅' if seen_on else 'خاموش ❌'}\n"
+        f"حالت تایپ/بازی: <code>{mode}</code>\n\n"
+        "سین مستقل است و می‌تواند همراه هرکدام از «تایپ» یا «بازی» روشن باشد؛ ولی تایپ و بازی با هم قابل‌روشن‌بودن نیستند."
+    )
+    def sty(m): return "success" if mode == m else "danger"
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        _btn("روشن سین", style=_sec_pair_style(seen_on, True), callback_data=f"axp:seenon:{uid}"),
+        _btn("خاموش سین", style=_sec_pair_style(seen_on, False), callback_data=f"axp:seenoff:{uid}")
+    )
+    kb.row(_btn("تایپ", style=sty("typing"), callback_data=f"axp:typingon:{uid}"))
+    kb.row(_btn("بازی", style=sty("game"), callback_data=f"axp:gameon:{uid}"))
+    kb.row(_btn("هیچکدام (خاموش)", style=sty("none"), callback_data=f"axp:behavnone:{uid}"))
+    kb.row(_btn("🔙 بازگشت به پنل بزرگ", style="danger", callback_data=f"axp:sec_back:{uid}"))
+    return text, kb
 
 def ax_panel_text(uid):
     return (
@@ -987,8 +1109,10 @@ def _push_view(c, text, markup, photo_id=None):
 def _edit_big_panel_inplace(c, uid):
     """بعد از هر تغییر (روشن/خاموش کردن قابلیت) همون پیام پنل بزرگ رو در جا آپدیت می‌کند،
     بدون حذف عکس زمینه (در صورت وجود)."""
-    text = ax_panel_text(uid)
-    markup = generate_ax_panel_markup(uid)
+    _edit_current_view(c, ax_panel_text(uid), generate_ax_panel_markup(uid))
+
+def _edit_current_view(c, text, markup):
+    """مثل بالا ولی برای هر متن/کیبورد دلخواه (برای زیربخش‌های پنل مثل ساعت و حالت متن)."""
     if c.inline_message_id:
         try:
             bot.edit_message_caption(text, inline_message_id=c.inline_message_id, reply_markup=markup, parse_mode="HTML")
@@ -1091,15 +1215,77 @@ def ax_panel_callback(c):
                     except Exception:
                         pass
             run_self_message(uid, f"✅ {key} {'روشن' if value else 'خاموش'} شد")
-        elif action == "bold":
-            value = 0 if s.get("bold_mode",0) else 1
-            set_self_settings(uid, "bold_mode", value)
-            set_self_settings(uid, "text_mode", "bold" if value else "normal")
-            run_self_message(uid, f"بولد {'روشن' if value else 'خاموش'} شد")
-        elif action in {"quote","spoiler"}:
+        elif action in {"bold","quote","spoiler"}:
+            # این سه حالت متن با هم انحصاری‌اند (فقط یکی می‌تواند فعال باشد)؛ روی همون فیلد text_mode ذخیره می‌شن.
             mode = action if s.get("text_mode") != action else "normal"
             set_self_settings(uid, "text_mode", mode)
+            set_self_settings(uid, "bold_mode", 1 if mode == "bold" else 0)
             run_self_message(uid, f"حالت متن: {mode}")
+            text, markup = render_textmode_section(uid)
+            _edit_current_view(c, text, markup)
+            return bot.answer_callback_query(c.id, "✅ انجام شد")
+        elif action == "textnormal":
+            set_self_settings(uid, "text_mode", "normal")
+            set_self_settings(uid, "bold_mode", 0)
+            run_self_message(uid, "حالت متن: normal")
+            text, markup = render_textmode_section(uid)
+            _edit_current_view(c, text, markup)
+            return bot.answer_callback_query(c.id, "✅ انجام شد")
+        elif action in {"clockon","clockoff"}:
+            value = 1 if action == "clockon" else 0
+            set_self_settings(uid, "is_clock_on", value)
+            ok, err = refresh_clock_profile(uid)
+            if not ok:
+                try:
+                    bot.answer_callback_query(c.id, f"⚠️ ذخیره شد ولی نام پروفایل تغییر نکرد: {err}", show_alert=True)
+                except Exception:
+                    pass
+            run_self_message(uid, f"✅ ساعت {'روشن' if value else 'خاموش'} شد")
+            text, markup = render_clock_section(uid)
+            _edit_current_view(c, text, markup)
+            return bot.answer_callback_query(c.id, "✅ انجام شد")
+        elif action in {"seenon","seenoff"}:
+            set_self_settings(uid, "is_seen_on", 1 if action == "seenon" else 0)
+            run_self_message(uid, f"✅ سین {'روشن' if action=='seenon' else 'خاموش'} شد")
+            text, markup = render_behavior_section(uid)
+            _edit_current_view(c, text, markup)
+            return bot.answer_callback_query(c.id, "✅ انجام شد")
+        elif action == "typingon":
+            set_self_settings(uid, "is_typing_on", 1)
+            set_self_settings(uid, "action_mode", "none")
+            run_self_message(uid, "✅ حالت تایپ روشن شد")
+            text, markup = render_behavior_section(uid)
+            _edit_current_view(c, text, markup)
+            return bot.answer_callback_query(c.id, "✅ انجام شد")
+        elif action == "gameon":
+            set_self_settings(uid, "action_mode", "game")
+            set_self_settings(uid, "is_typing_on", 0)
+            run_self_message(uid, "✅ حالت بازی روشن شد")
+            text, markup = render_behavior_section(uid)
+            _edit_current_view(c, text, markup)
+            return bot.answer_callback_query(c.id, "✅ انجام شد")
+        elif action == "behavnone":
+            set_self_settings(uid, "is_typing_on", 0)
+            set_self_settings(uid, "action_mode", "none")
+            run_self_message(uid, "✅ تایپ و بازی خاموش شد")
+            text, markup = render_behavior_section(uid)
+            _edit_current_view(c, text, markup)
+            return bot.answer_callback_query(c.id, "✅ انجام شد")
+        elif action == "sec_behavior":
+            text, markup = render_behavior_section(uid)
+            _edit_current_view(c, text, markup)
+            return bot.answer_callback_query(c.id)
+        elif action == "sec_clock":
+            text, markup = render_clock_section(uid)
+            _edit_current_view(c, text, markup)
+            return bot.answer_callback_query(c.id)
+        elif action == "sec_textmode":
+            text, markup = render_textmode_section(uid)
+            _edit_current_view(c, text, markup)
+            return bot.answer_callback_query(c.id)
+        elif action == "sec_back":
+            _edit_current_view(c, ax_panel_text(uid), generate_ax_panel_markup(uid))
+            return bot.answer_callback_query(c.id)
         elif action == "poster":
             if not s.get("poster_chat_id") or not (s.get("poster_text") or "").strip():
                 return bot.answer_callback_query(
@@ -1123,18 +1309,14 @@ def ax_panel_callback(c):
             # اگر خاموش است، فونت ذخیره می‌شود و با روشن‌کردن ساعت اعمال خواهد شد.
             ok, err = refresh_clock_profile(uid)
             preview = format_clock_by_font('12:34', value)
+            text, markup = render_clock_section(uid)
+            _edit_current_view(c, text, markup)
             if ok:
                 run_self_message(uid, f"🔤 فونت ساعت/اسم به {value} تغییر کرد: {preview}")
-                try:
-                    bot.answer_callback_query(c.id, f"✅ فونت تغییر کرد: {preview}", show_alert=True)
-                except Exception:
-                    pass
+                return bot.answer_callback_query(c.id, f"✅ فونت تغییر کرد: {preview}", show_alert=True)
             else:
                 # ذخیره فونت حتی در صورت قطع‌بودن سلف؛ با Refresh بعدی اعمال می‌شود.
-                try:
-                    bot.answer_callback_query(c.id, f"⚠️ فونت {value} ذخیره شد؛ اتصال سلف برای تغییر اسم برقرار نیست.", show_alert=True)
-                except Exception:
-                    pass
+                return bot.answer_callback_query(c.id, f"⚠️ فونت {value} ذخیره شد؛ اتصال سلف برای تغییر اسم برقرار نیست.", show_alert=True)
         elif action == "action":
             value = "none" if s.get("action_mode") == "game" else "game"
             set_self_settings(uid, "action_mode", value)
@@ -1323,11 +1505,14 @@ def refresh_clock_profile(uid):
         s = get_self_settings(uid)
         me = await client.get_me()
         current_first = me.first_name or ""
-        # همیشه نام پایه را از مقدار ذخیره‌شده می‌گیریم و ساعت قبلی را پاک می‌کنیم.
-        base = _clean_clock_from_name(s.get("base_first_name") or current_first)
+        if s.get("is_clock_on"):
+            # ساعت روشنه: نام فعلی پروفایل شامل ساعت هست، پس باید از نام پایه‌ی ذخیره‌شده استفاده کنیم.
+            base = _clean_clock_from_name(s.get("base_first_name") or current_first)
+        else:
+            # ساعت خاموشه: نام فعلی پروفایل خودِ نام واقعیه، همیشه پایه رو با همین به‌روز نگه می‌داریم.
+            base = _clean_clock_from_name(current_first)
         base = base.strip() or "Self"
-        if not s.get("base_first_name") or _clean_clock_from_name(s.get("base_first_name")) != base:
-            set_self_settings(uid, "base_first_name", base)
+        set_self_settings(uid, "base_first_name", base)
         last_name = s.get("base_last_name") or me.last_name or ""
         if s.get("is_clock_on"):
             display = get_clock_display(uid)
@@ -1362,7 +1547,10 @@ async def _apply_text_style(message, uid):
             except Exception:
                 await message.edit_text(f"「{raw}」")
         elif mode == "spoiler":
-            await message.edit_text(f"<tg-spoiler>{_escape_html(raw)}</tg-spoiler>", parse_mode=enums.ParseMode.HTML)
+            try:
+                await message.edit_text(raw, entities=[MessageEntitySpoiler(offset=0, length=len(raw))])
+            except Exception:
+                await message.edit_text(f"‖{raw}‖")
     except Exception:
         pass
 
@@ -1377,14 +1565,25 @@ async def _clock_loop(client, uid):
             set_self_settings(uid, "base_last_name", me.last_name or "")
         while is_self_active(uid):
             s = get_self_settings(uid)
-            base = _clean_clock_from_name(s.get("base_first_name") or me.first_name or "")
-            target_name = f"{base} {get_clock_display(uid)}".strip() if s.get("is_clock_on") else base
-            try:
-                current = await client.get_me()
-                if (current.first_name or "") != target_name:
-                    await client.update_profile(first_name=target_name, last_name=s.get("base_last_name") or current.last_name or "")
-            except Exception as e:
-                logging.debug("clock profile update failed for %s: %s", uid, e)
+            if s.get("is_clock_on"):
+                base = _clean_clock_from_name(s.get("base_first_name") or me.first_name or "")
+                target_name = f"{base} {get_clock_display(uid)}".strip()
+                try:
+                    current = await client.get_me()
+                    if (current.first_name or "") != target_name:
+                        await client.update_profile(first_name=target_name, last_name=s.get("base_last_name") or current.last_name or "")
+                except Exception as e:
+                    logging.debug("clock profile update failed for %s: %s", uid, e)
+            else:
+                # ساعت خاموشه: چیزی روی پروفایل ست نمی‌کنیم، فقط نام پایه رو با نام واقعی فعلی همگام نگه می‌داریم
+                # تا وقتی دوباره ساعت روشن شد، از روی همین آخرین نام واقعی ساخته بشه، نه نام قدیمی.
+                try:
+                    current = await client.get_me()
+                    current_base = _clean_clock_from_name(current.first_name or "")
+                    if current_base and current_base != s.get("base_first_name"):
+                        set_self_settings(uid, "base_first_name", current_base)
+                except Exception as e:
+                    logging.debug("clock base sync failed for %s: %s", uid, e)
             await asyncio.sleep(30)
     except asyncio.CancelledError:
         return
@@ -1488,16 +1687,23 @@ async def _incoming_features(client, message, uid):
         except Exception: pass
         return
 
-    # منشی فقط پیوی
+    # منشی فقط پیوی، و فقط وقتی خودتون آفلاین هستید (روی هیچ دستگاهی آنلاین نباشید)
     if message.chat and message.chat.type == enums.ChatType.PRIVATE and (s.get("is_auto_reply_on") or s.get("tabchi_on")):
-        reply_text = s.get("auto_reply_text") if s.get("is_auto_reply_on") else s.get("tabchi_text")
-        reply_text = reply_text or "سلام 👋 پیام شما دریافت شد."
+        is_online_now = False
         try:
-            if s.get("is_typing_on"):
-                await client.send_chat_action(message.chat.id, enums.ChatAction.TYPING)
-                await asyncio.sleep(1)
-            await message.reply_text(reply_text)
-        except Exception: pass
+            me = await client.get_me()
+            is_online_now = getattr(me, "status", None) == enums.UserStatus.ONLINE
+        except Exception:
+            is_online_now = False
+        if not is_online_now:
+            reply_text = s.get("auto_reply_text") if s.get("is_auto_reply_on") else s.get("tabchi_text")
+            reply_text = reply_text or "سلام 👋 پیام شما دریافت شد."
+            try:
+                if s.get("is_typing_on"):
+                    await client.send_chat_action(message.chat.id, enums.ChatAction.TYPING)
+                    await asyncio.sleep(1)
+                await message.reply_text(reply_text)
+            except Exception: pass
 
 async def _safe_delete(message):
     try: await message.delete()
@@ -1591,7 +1797,8 @@ async def _self_runtime_handler(client, message):
             uid = 0
     if not uid or not is_self_active(uid) or not message.outgoing or not message.text:
         return
-    cmd = re.sub(r"\s+", " ", message.text.strip())
+    raw_cmd = message.text.strip()
+    cmd = re.sub(r"\s+", " ", raw_cmd)
     low = cmd.casefold()
     if low in {"پنل","panel","/panel"}:
         await self_panel_command_controller(client, message); return
@@ -1679,8 +1886,8 @@ async def _self_runtime_handler(client, message):
         else: arr.clear(); msg="✅ تمام متن‌ها حذف شدند."
         set_self_settings(uid,key,json.dumps(arr,ensure_ascii=False)); await message.edit_text(msg); return
 
-    # منشی
-    m=re.match(r"^تنظیم متن منشی(?:\s+(.+))?$",cmd,re.S)
+    # منشی (متن از روی raw_cmd گرفته می‌شود تا خط‌های جدید/فاصله‌های داخلش حفظ شوند)
+    m=re.match(r"^تنظیم متن منشی(?:\s+(.+))?$",raw_cmd,re.S)
     if m:
         txt=(m.group(1) or "").strip(); set_self_settings(uid,"auto_reply_text",txt); await message.edit_text("✅ متن منشی تنظیم شد." if txt else "✅ متن منشی به حالت پیش‌فرض برگشت."); return
 
@@ -1954,6 +2161,252 @@ def cmd_panel(m: types.Message):
         return bot.send_message(m.chat.id, "❌ سلف شما فعال نیست.\nابتدا سلف را فعال کنید.")
     _send_self_iran_menu(m.chat.id, uid)
 
+# ---------- ورود کد با کیبورد شیشه‌ای ----------
+CODE_KEYPAD = {}      # uid -> رشته رقم‌های واردشده (با فاصله)
+CODE_KEYPAD_MSG = {}  # uid -> (chat_id, message_id, is_media)
+
+def _code_entry_caption(uid):
+    digits = CODE_KEYPAD.get(uid, "").strip()
+    # علامت‌های ایزوله‌ی LTR تا رشته‌ی عددی داخل متن فارسی برعکس نمایش داده نشود.
+    digits_display = ("\u2066" + digits + "\u2069") if digits else ""
+    return (
+        "کد ارسال شده از طرف حساب رسمی تلگرام به اکانت‌تون رو با دکمه‌های زیر وارد نمایید:\n\n"
+        f"کد وارد شده : {digits_display}"
+    )
+
+def _code_keypad_markup():
+    kb = types.InlineKeyboardMarkup(row_width=3)
+    kb.row(
+        types.InlineKeyboardButton("1", callback_data="codepad:d:1"),
+        types.InlineKeyboardButton("2", callback_data="codepad:d:2"),
+        types.InlineKeyboardButton("3", callback_data="codepad:d:3"),
+    )
+    kb.row(
+        types.InlineKeyboardButton("4", callback_data="codepad:d:4"),
+        types.InlineKeyboardButton("5", callback_data="codepad:d:5"),
+        types.InlineKeyboardButton("6", callback_data="codepad:d:6"),
+    )
+    kb.row(
+        types.InlineKeyboardButton("7", callback_data="codepad:d:7"),
+        types.InlineKeyboardButton("8", callback_data="codepad:d:8"),
+        types.InlineKeyboardButton("9", callback_data="codepad:d:9"),
+    )
+    kb.row(types.InlineKeyboardButton("0", callback_data="codepad:d:0"))
+    kb.row(
+        _btn("✅", style="success", callback_data="codepad:ok"),
+        _btn("🗑", style="danger", callback_data="codepad:clear"),
+    )
+    kb.row(_btn("❌ لغو", style="danger", callback_data="codepad:cancel"))
+    return kb
+
+def _send_code_entry(uid):
+    CODE_KEYPAD[uid] = ""
+    media_id = get_setting("code_media_id")
+    media_type = get_setting("code_media_type")
+    caption = _code_entry_caption(uid)
+    markup = _code_keypad_markup()
+    sent = None
+    if media_id:
+        try:
+            if media_type == "animation":
+                sent = bot.send_animation(uid, media_id, caption=caption, reply_markup=markup)
+            else:
+                sent = bot.send_photo(uid, media_id, caption=caption, reply_markup=markup)
+        except Exception:
+            sent = None
+    is_media = bool(sent)
+    if not sent:
+        sent = bot.send_message(uid, caption, reply_markup=markup)
+    CODE_KEYPAD_MSG[uid] = (sent.chat.id, sent.message_id, is_media)
+
+def _edit_code_entry_msg(uid, text, markup):
+    info = CODE_KEYPAD_MSG.get(uid)
+    if not info:
+        return False
+    chat_id, msg_id, is_media = info
+    try:
+        if is_media:
+            bot.edit_message_caption(text, chat_id, msg_id, reply_markup=markup)
+        else:
+            bot.edit_message_text(text, chat_id, msg_id, reply_markup=markup)
+        return True
+    except Exception:
+        return False
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("codepad:"))
+def cb_codepad(c: types.CallbackQuery):
+    uid = c.from_user.id
+    st = temp_data.get(uid)
+    if uid not in CODE_KEYPAD or not st or st.get("step") != "code":
+        return bot.answer_callback_query(c.id, "❌ این کیبورد منقضی شده است.", show_alert=True)
+
+    parts = c.data.split(":")
+    action = parts[1]
+
+    if action == "d":
+        cur = CODE_KEYPAD.get(uid, "")
+        if len(cur.replace(" ", "")) >= 5:
+            return bot.answer_callback_query(c.id, "فقط ۵ رقم لازم است، روی ✅ بزنید.")
+        CODE_KEYPAD[uid] = cur + parts[2] + " "
+        _edit_code_entry_msg(uid, _code_entry_caption(uid), _code_keypad_markup())
+        return bot.answer_callback_query(c.id)
+
+    elif action == "clear":
+        CODE_KEYPAD[uid] = ""
+        _edit_code_entry_msg(uid, _code_entry_caption(uid), _code_keypad_markup())
+        return bot.answer_callback_query(c.id, "پاک شد.")
+
+    elif action == "cancel":
+        state = temp_data.pop(uid, None)
+        client = LOGIN_CLIENTS.pop(uid, None)
+        if client:
+            try:
+                run_login_coro(client.disconnect())
+            except Exception:
+                pass
+        if state and state.get("activation_paid"):
+            change_balance(uid, ACTIVATE_COST)
+        CODE_KEYPAD.pop(uid, None)
+        _edit_code_entry_msg(uid, "❌ فعال‌سازی لغو شد.", None)
+        CODE_KEYPAD_MSG.pop(uid, None)
+        return bot.answer_callback_query(c.id)
+
+    elif action == "ok":
+        code = CODE_KEYPAD.get(uid, "").strip()
+        if len(code.replace(" ", "")) != 5:
+            return bot.answer_callback_query(c.id, "❌ کد باید ۵ رقم باشد.", show_alert=True)
+        bot.answer_callback_query(c.id, "⏳ در حال بررسی...")
+        run_login_coro(_do_verify(uid, code))
+
+def _utf16_len(s: str) -> int:
+    return len(s.encode("utf-16-le")) // 2
+
+async def _send_premium_welcome(live_client, uid):
+    """پیام خوش‌آمد با ایموجی‌های پریمیوم، فقط داخل Saved Messages خودِ اکانت (نه اینجا در بات)."""
+    text = "سلف با موفقیت فعال شد 🔥\nبرای دیدن دستورات بنویس پنل ✅\nسلف iran 😊"
+    emoji_map = [
+        ("🔥", 5102951090777752752),
+        ("✅", 5875465628285931233),
+        ("😊", 5985369146991317309),
+    ]
+    entities = []
+    for emoji, doc_id in emoji_map:
+        idx = text.find(emoji)
+        if idx == -1:
+            continue
+        offset = _utf16_len(text[:idx])
+        length = _utf16_len(emoji)
+        entities.append(MessageEntityCustomEmoji(offset=offset, length=length, document_id=doc_id))
+    try:
+        await live_client.send_message("me", text, entities=entities)
+    except Exception as e:
+        logging.debug("premium welcome message (with premium emoji) failed for %s: %s", uid, e)
+        # اکانت‌های بدون پرمیوم/یوزرنیم NFT اجازه‌ی ارسال ایموجی سفارشی را ندارند؛
+        # به‌جای اینکه هیچی نفرستیم، همون متن رو بدون entity ویژه (با همون ایموجی معمولی) می‌فرستیم.
+        try:
+            await live_client.send_message("me", text)
+        except Exception as e2:
+            logging.debug("premium welcome message (plain fallback) failed for %s: %s", uid, e2)
+
+async def _do_verify(uid, raw_input):
+    """بررسی کد ورود (از کیبورد شیشه‌ای) یا رمز دو مرحله‌ای (متنی) و فعال‌سازی نهایی سلف."""
+    st = temp_data.get(uid)
+    client = LOGIN_CLIENTS.get(uid)
+    if not st or not client:
+        bot.send_message(uid, "❌ نشست ورود پیدا نشد. دوباره فعال‌سازی سلف را بزنید.")
+        return
+
+    normalized_text = normalize_digits(raw_input)
+
+    try:
+        if st["step"] == "password":
+            await client.check_password(raw_input)
+        else:
+            await client.sign_in(st["phone"], st["phone_code_hash"], normalized_text)
+
+        # هزینه 20 الماس قبلاً در زمان شروع فعال‌سازی کسر شده است.
+        # اینجا فقط وضعیت سلف را فعال می‌کنیم و دوباره هزینه کم نمی‌شود.
+        with db_lock:
+            with sqlite3.connect(DB_PATH) as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE users SET is_self_active=1, self_active_time=? WHERE user_id=?",
+                    (int(time.time()), uid)
+                )
+                conn.commit()
+
+        # تبدیل نشست ورود به سلف زنده تا «پنل» از خود اکانت قابل دریافت باشد.
+        session_string = await client.export_session_string()
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        live_client = Client(
+            f"self_{uid}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=session_string,
+            no_updates=False
+        )
+        await live_client.start()
+        await _attach_self_runtime(live_client, uid)
+        old_live = SELF_CLIENTS.pop(uid, None)
+        if old_live:
+            try: await old_live.stop()
+            except Exception: pass
+        SELF_CLIENTS[uid] = live_client
+        temp_data.pop(uid, None)
+        LOGIN_CLIENTS[uid] = live_client
+        await _send_premium_welcome(live_client, uid)
+
+        _edit_code_entry_msg(uid, "✅ کد تایید شد.", None)
+        CODE_KEYPAD.pop(uid, None)
+        CODE_KEYPAD_MSG.pop(uid, None)
+
+        bot.send_message(
+            uid,
+            "✅ ورود با موفقیت انجام شد.\n\n"
+            "🔐 سلف شما فعال شد.\n"
+            f"💎 هزینه فعال‌سازی: {ACTIVATE_COST} الماس\n"
+            f"💎 هزینه هر ساعت: {HOURLY_COST} الماس\n"
+            f"💎 موجودی فعلی: {get_balance(uid)} الماس\n\n"
+            "برای باز کردن پنل، « پنل » را ارسال کنید\n"
+            " برای دیدن  دستورات  « راهنما » را ارسال  کنید"
+        )
+
+    except SessionPasswordNeeded:
+        st["step"] = "password"
+        st["time"] = time.time()
+        _edit_code_entry_msg(uid, "🔐 کد تایید شد. این حساب رمز دو مرحله‌ای دارد.", None)
+        CODE_KEYPAD.pop(uid, None)
+        CODE_KEYPAD_MSG.pop(uid, None)
+        bot.send_message(uid, "🔐 لطفاً رمز 2FA را وارد کنید:")
+    except Exception as e:
+        err = str(e)
+        if "PHONE_CODE_INVALID" in err:
+            if uid in CODE_KEYPAD_MSG:
+                CODE_KEYPAD[uid] = ""
+                caption = "❌ کد اشتباه بود، لطفاً کد را درست وارد کنید.\n\n" + _code_entry_caption(uid)
+                _edit_code_entry_msg(uid, caption, _code_keypad_markup())
+            else:
+                bot.send_message(uid, "❌ کد اشتباه است. دوباره کد را وارد کنید.")
+        elif "PHONE_CODE_EXPIRED" in err:
+            state = temp_data.pop(uid, None)
+            LOGIN_CLIENTS.pop(uid, None)
+            CODE_KEYPAD.pop(uid, None)
+            CODE_KEYPAD_MSG.pop(uid, None)
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            if state and state.get("activation_paid"):
+                change_balance(uid, ACTIVATE_COST)
+                bot.send_message(uid, f"❌ کد منقضی شده است.\n💎 {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد.")
+            else:
+                bot.send_message(uid, "❌ کد منقضی شده است. دوباره شماره خود را ارسال کنید.")
+        else:
+            bot.send_message(uid, f"❌ خطا در ورود: {err}")
+
 @bot.message_handler(
     func=lambda m: (
         in_private(m)
@@ -1979,11 +2432,18 @@ def handle_code_input(m: types.Message):
                 pass
         if state and state.get("activation_paid"):
             change_balance(uid, ACTIVATE_COST)
+        CODE_KEYPAD.pop(uid, None)
+        CODE_KEYPAD_MSG.pop(uid, None)
         bot.reply_to(
             m,
             "❌ زمان کد منقضی شده است. دوباره فعال‌سازی را شروع کنید.\n"
             f"💎 {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد."
         )
+        return
+
+    if st["step"] == "code":
+        # مرحله کد فقط با کیبورد شیشه‌ای بالای صفحه انجام می‌شود.
+        bot.reply_to(m, "📝 لطفاً کد را با دکمه‌های شیشه‌ای بالا وارد کنید، نه به‌صورت متن.")
         return
 
     client = LOGIN_CLIENTS.get(uid)
@@ -1992,90 +2452,7 @@ def handle_code_input(m: types.Message):
         bot.reply_to(m, "❌ نشست ورود پیدا نشد. دوباره فعال‌سازی سلف را بزنید.")
         return
 
-    # کد را قبل از بررسی، از اعداد فارسی/عربی به انگلیسی تبدیل می‌کنیم.
-    normalized_text = normalize_digits(text)
-
-    if st["step"] == "code" and (not normalized_text.isdigit() or len(normalized_text) != 5):
-        bot.reply_to(m, "❌ لطفاً کد ۵ رقمی دریافت شده از تلگرام را با فاصله وارد کنید.\nمثال: ( 1 2 3 4 5)")
-        return
-
-    async def verify():
-        try:
-            if st["step"] == "password":
-                await client.check_password(text)
-            else:
-                await client.sign_in(
-                    st["phone"],
-                    st["phone_code_hash"],
-                    normalized_text
-                )
-
-            # هزینه 20 الماس قبلاً در زمان شروع فعال‌سازی کسر شده است.
-            # اینجا فقط وضعیت سلف را فعال می‌کنیم و دوباره هزینه کم نمی‌شود.
-            with db_lock:
-                with sqlite3.connect(DB_PATH) as conn:
-                    cur = conn.cursor()
-                    cur.execute(
-                        "UPDATE users SET is_self_active=1, self_active_time=? WHERE user_id=?",
-                        (int(time.time()), uid)
-                    )
-                    conn.commit()
-
-            # تبدیل نشست ورود به سلف زنده تا «پنل» از خود اکانت قابل دریافت باشد.
-            session_string = await client.export_session_string()
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-            live_client = Client(
-                f"self_{uid}",
-                api_id=API_ID,
-                api_hash=API_HASH,
-                session_string=session_string,
-                no_updates=False
-            )
-            await live_client.start()
-            await _attach_self_runtime(live_client, uid)
-            old_live = SELF_CLIENTS.pop(uid, None)
-            if old_live:
-                try: await old_live.stop()
-                except Exception: pass
-            SELF_CLIENTS[uid] = live_client
-            temp_data.pop(uid, None)
-            LOGIN_CLIENTS[uid] = live_client
-            bot.send_message(
-                uid,
-                "✅ ورود با موفقیت انجام شد.\n\n"
-                "🔐 سلف شما فعال شد.\n"
-                f"💎 هزینه فعال‌سازی: {ACTIVATE_COST} الماس\n"
-                f"💎 موجودی فعلی: {get_balance(uid)} الماس\n\n"
-                "برای باز کردن پنل، «پنل» را ارسال کنید و برای دیدن  دستورات   « رهنما » را ارسال  کنید"
-            )
-
-        except SessionPasswordNeeded:
-            st["step"] = "password"
-            st["time"] = time.time()
-            bot.send_message(uid, "🔐 این حساب رمز دو مرحله‌ای دارد.\nلطفاً رمز 2FA را وارد کنید:")
-        except Exception as e:
-            err = str(e)
-            if "PHONE_CODE_INVALID" in err:
-                bot.send_message(uid, "❌ کد اشتباه است. دوباره کد را وارد کنید.")
-            elif "PHONE_CODE_EXPIRED" in err:
-                state = temp_data.pop(uid, None)
-                LOGIN_CLIENTS.pop(uid, None)
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-                if state and state.get("activation_paid"):
-                    change_balance(uid, ACTIVATE_COST)
-                    bot.send_message(uid, f"❌ کد منقضی شده است.\n💎 {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد.")
-                else:
-                    bot.send_message(uid, "❌ کد منقضی شده است. دوباره شماره خود را ارسال کنید.")
-            else:
-                bot.send_message(uid, f"❌ خطا در ورود: {err}")
-
-    run_login_coro(verify())
+    run_login_coro(_do_verify(uid, text))
 
 
 def run_self_message(uid, text):
@@ -2103,6 +2480,37 @@ def cb_self(c):
     ensure_user(user_id)
     action = c.data.split(":")[1]
     
+    if action == "pause":
+        with db_lock:
+            with sqlite3.connect(DB_PATH) as conn:
+                cur = conn.cursor()
+                cur.execute("UPDATE users SET is_self_active=0, self_active_time=0 WHERE user_id=?", (user_id,))
+                conn.commit()
+        bot.send_message(c.message.chat.id, "⏸ سلف شما خاموش شد (نشست شما هنوز وصل است، برای روشن کردن دوباره نیازی به لاگین ندارید).")
+        return
+
+    if action == "resume":
+        live = SELF_CLIENTS.get(user_id)
+        if not live:
+            bot.send_message(c.message.chat.id, "❌ نشست فعالی پیدا نشد. باید از اول لاگین کنید.")
+            return
+        bal = get_balance(user_id)
+        if bal < ACTIVATE_COST:
+            bot.send_message(c.message.chat.id, f"❌ موجودی کافی نیست.\nهزینه روشن کردن سلف: {ACTIVATE_COST} الماس\nموجودی شما: {bal} الماس")
+            return
+        change_balance(user_id, -ACTIVATE_COST)
+        with db_lock:
+            with sqlite3.connect(DB_PATH) as conn:
+                cur = conn.cursor()
+                cur.execute("UPDATE users SET is_self_active=1, self_active_time=? WHERE user_id=?", (int(time.time()), user_id))
+                conn.commit()
+        try:
+            run_login_coro(_send_premium_welcome(live, user_id))
+        except Exception:
+            pass
+        bot.send_message(c.message.chat.id, f"✅ سلف شما دوباره روشن شد.\n💎 {ACTIVATE_COST} الماس کسر شد.\n💎 موجودی فعلی: {get_balance(user_id)} الماس")
+        return
+
     if action == "deactivate":
         deactivate_self(user_id)
         live = SELF_CLIENTS.pop(user_id, None)
@@ -2130,7 +2538,13 @@ def cb_self(c):
                     pass
             try: run_login_coro(_restore_and_stop())
             except Exception: pass
-        bot.send_message(c.message.chat.id, "❌ سلف شما غیرفعال شد.")
+        # حذف کامل تنظیمات/اطلاعات سلف از سرور؛ فقط موجودی الماس (که در جدول users است) دست‌نخورده می‌ماند.
+        with db_lock:
+            with sqlite3.connect(DB_PATH) as conn:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM self_settings WHERE user_id=?", (user_id,))
+                conn.commit()
+        bot.send_message(c.message.chat.id, "❌ سلف شما غیرفعال شد و تمام اطلاعات آن (به‌جز موجودی الماس) حذف شد.")
 
 # ============================================================
 # ✅ بخش پنل خدمات
@@ -2167,14 +2581,20 @@ def cmd_profile(m: types.Message, with_back=False):
     bot.send_message(m.chat.id, text, reply_markup=kb)
 
 # ----------------- TRANSFER -----------------
-def transfer_receipt_markup(sender_disp, receiver_id, amount, tax, received):
+def transfer_receipt_markup(sender_disp, sender_balance, receiver_disp, receiver_balance):
     kb = types.InlineKeyboardMarkup()
-    kb.row(types.InlineKeyboardButton(f"👤 {sender_disp}", callback_data="noop:x"))
-    kb.row(types.InlineKeyboardButton(f"👥 {receiver_id}", callback_data="noop:x"))
-    kb.row(types.InlineKeyboardButton(f"💵 {amount}", callback_data="noop:x"))
-    kb.row(types.InlineKeyboardButton(f"🧾 {tax}", callback_data="noop:x"))
-    kb.row(types.InlineKeyboardButton(f"✅ {received}", callback_data="noop:x"))
+    kb.row(
+        _btn(f"فرستنده: {sender_disp}", style="primary", callback_data="noop:x"),
+        _btn(f"💎 {sender_balance}", style="primary", callback_data="noop:x")
+    )
+    kb.row(
+        _btn(f"گیرنده: {receiver_disp}", style="danger", callback_data="noop:x"),
+        _btn(f"💎 {receiver_balance}", style="danger", callback_data="noop:x")
+    )
     return kb
+
+def _display_or_id(username, uid):
+    return f"@{username}" if username else str(uid)
 
 def _reply_transfer_receipt(message, receipt, kb):
     """رسید انتقال داخل گروه؛ اگر ادمین عکس انتقال تنظیم کرده باشد، به‌صورت عکس + کپشن ارسال می‌شود."""
@@ -2229,15 +2649,19 @@ def transfer_diamonds(message):
         tax = 0
         change_balance(receiver_id, amount)
         sender_name = message.from_user.username or message.from_user.first_name or f"مالک"
+        if message.reply_to_message and message.reply_to_message.from_user:
+            receiver_disp = _display_or_id(message.reply_to_message.from_user.username, receiver_id)
+        else:
+            try:
+                receiver_disp = _display_or_id(bot.get_chat(receiver_id).username, receiver_id)
+            except Exception:
+                receiver_disp = str(receiver_id)
         receipt = (
-            "💎 رسید انتقال الماس\n"
-            "👤 فرستنده\n"
-            "👥 گیرنده\n"
-            "💵 مبلغ ارسال\n"
-            "🧾 مالیات\n"
-            "✅ مبلغ دریافتی گیرنده"
+            "✔️ انتقال الماس انجام شد.\n\n"
+            f"💎 {amount} الماس با موفقیت به {receiver_disp} انتقال داده شد.\n\n"
+            "موجودی جدید دو کاربر:"
         )
-        kb = transfer_receipt_markup(f"{sender_name} (مالک)", receiver_id, amount, tax, amount)
+        kb = transfer_receipt_markup(f"{sender_name} (مالک)", "∞", receiver_disp, get_balance(receiver_id))
         _reply_transfer_receipt(message, receipt, kb)
         try:
             bot.send_message(
@@ -2261,16 +2685,20 @@ def transfer_diamonds(message):
     change_balance(receiver_id, amount)
 
     sender_name = message.from_user.username or message.from_user.first_name or f"کاربر {sender_id}"
+    if message.reply_to_message and message.reply_to_message.from_user:
+        receiver_disp = _display_or_id(message.reply_to_message.from_user.username, receiver_id)
+    else:
+        try:
+            receiver_disp = _display_or_id(bot.get_chat(receiver_id).username, receiver_id)
+        except Exception:
+            receiver_disp = str(receiver_id)
 
     receipt = (
-        "💎 رسید انتقال الماس\n"
-        "👤 فرستنده\n"
-        "👥 گیرنده\n"
-        "💵 مبلغ ارسال\n"
-        "🧾 مالیات\n"
-        "✅ مبلغ دریافتی گیرنده"
+        "✔️ انتقال الماس انجام شد.\n\n"
+        f"💎 {amount} الماس با موفقیت به {receiver_disp} انتقال داده شد.\n\n"
+        "موجودی جدید دو کاربر:"
     )
-    kb = transfer_receipt_markup(sender_name, receiver_id, amount, tax, amount)
+    kb = transfer_receipt_markup(sender_name, get_balance(sender_id), receiver_disp, get_balance(receiver_id))
     _reply_transfer_receipt(message, receipt, kb)
 
     try:
@@ -2293,23 +2721,25 @@ BET_OPEN_TEXT = (
     "👤 سازنده: {creator}\n"
     "◈ ━━━━ ˢᴱᴸᶠ ᴵᴿᴬᴺ ━━━━━ ◈"
 )
-BET_RESULT_TEXT = (
-    "◈━━━━━━ ˢᴱᴸᶠ ᴵᴿᴬᴺ ━━━━━━ ◈\n"
-    "نتیجه شرطبندی:\n"
-    "🏆 برنده\n"
-    "💀 بازنده\n"
-    "💎 جایزه\n"
-    "🧾 مالیات\n"
-    "◈━━━━━━ ˢᴱᴸᶠ ᴵᴿᴬᴺ ━━━━━━ ◈"
-)
+BET_RESULT_TEXT = "🎮 نتیجه شرط‌بندی مشخص شد."
 
-def bet_result_markup(winner_disp, loser_disp, prize, tax):
-    """دکمه‌های فیک (بدون عملکرد) که فقط مقدار واقعی هر ردیف نتیجه را نشان می‌دهند."""
+def bet_result_markup(winner_disp, loser_disp, prize, winner_balance, loser_balance):
+    """دکمه‌های فیک (بدون عملکرد) رنگی که مقدار واقعی هر ردیف نتیجه را نشان می‌دهند."""
     kb = types.InlineKeyboardMarkup()
-    kb.row(types.InlineKeyboardButton(f"🏆 {winner_disp}", callback_data="noop:x"))
-    kb.row(types.InlineKeyboardButton(f"💀 {loser_disp}", callback_data="noop:x"))
-    kb.row(types.InlineKeyboardButton(f"💎 {prize}", callback_data="noop:x"))
-    kb.row(types.InlineKeyboardButton(f"🧾 {tax}", callback_data="noop:x"))
+    kb.row(_btn(f"🎉 بازیکن برنده: {winner_disp}", style="primary", callback_data="noop:x"))
+    kb.row(_btn(f"💀 بازیکن بازنده: {loser_disp}", style="danger", callback_data="noop:x"))
+    kb.row(
+        _btn("🎉 جایزه برنده", style="primary", callback_data="noop:x"),
+        _btn(f"💎 {prize}", style="primary", callback_data="noop:x")
+    )
+    kb.row(
+        _btn("💎 موجودی برنده", style="success", callback_data="noop:x"),
+        _btn(f"💎 {winner_balance}", style="success", callback_data="noop:x")
+    )
+    kb.row(
+        _btn("💎 موجودی بازنده", style="danger", callback_data="noop:x"),
+        _btn(f"💎 {loser_balance}", style="danger", callback_data="noop:x")
+    )
     return kb
 
 def bet_keyboard(bet_id: int, creator_id: int):
@@ -2434,7 +2864,7 @@ def cb_bet(c):
             if joined_id:
                 return bot.answer_callback_query(c.id, "یک نفر قبلاً پیوسته است.")
             if user_id == creator_id:
-                return bot.answer_callback_query(c.id, "نمی‌توانید توی شرط خودتان شرکت کنید.")
+                return bot.answer_callback_query(c.id, "نمی‌توانید روی شرط خودتان شرکت کنید.")
 
             bal = get_balance(user_id)
             if bal < amount:
@@ -2460,7 +2890,8 @@ def cb_bet(c):
                 user_display_from_id(winner_id),
                 user_display_from_id(loser_id),
                 prize,
-                tax
+                get_balance(winner_id),
+                get_balance(loser_id)
             )
             try:
                 if is_photo:
@@ -2517,6 +2948,7 @@ def admin_main_markup(uid):
     kb.row(types.InlineKeyboardButton("🖼 تنظیم عکس استارت", callback_data="admin:set_start_photo"))
     kb.row(types.InlineKeyboardButton("🎲 تنظیم عکس شرط‌بندی", callback_data="admin:set_bet_photo"))
     kb.row(types.InlineKeyboardButton("💎 تنظیم عکس انتقال گروه", callback_data="admin:set_transfer_photo"))
+    kb.row(types.InlineKeyboardButton("🔢 تنظیم عکس/گیف صفحه کد", callback_data="admin:set_code_media"))
     kb.row(types.InlineKeyboardButton("👤 تنظیم عکس پنل سلف", callback_data="admin:set_self_panel_photo"))
     kb.row(types.InlineKeyboardButton("❌ بستن", callback_data="admin:close"))
     return kb
@@ -2619,6 +3051,13 @@ def cb_admin(c):
             c.message.chat.id,c.message.message_id,
             reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back"))
         )
+    if action=="set_code_media":
+        ADMIN_STATE[uid]="set_code_media"
+        return bot.edit_message_text(
+            "🔢 یک عکس یا گیف بفرستید تا بالای صفحه‌ی ورود کد (کیبورد شیشه‌ای) نمایش داده شود.",
+            c.message.chat.id,c.message.message_id,
+            reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back"))
+        )
     if action=="set_transfer_photo":
         ADMIN_STATE[uid]="set_transfer_photo"
         return bot.edit_message_text(
@@ -2648,7 +3087,7 @@ def cb_admin(c):
         return
     bot.answer_callback_query(c.id)
 
-@bot.message_handler(content_types=['text','photo'], func=lambda m: m.from_user and m.from_user.id in ADMIN_STATE)
+@bot.message_handler(content_types=['text','photo','animation'], func=lambda m: m.from_user and m.from_user.id in ADMIN_STATE)
 def admin_state_handler(m: types.Message):
     uid=m.from_user.id; state=ADMIN_STATE.get(uid)
     if not is_admin(uid): ADMIN_STATE.pop(uid,None); return
@@ -2706,6 +3145,18 @@ def admin_state_handler(m: types.Message):
         set_setting("start_photo", file_id)
         ADMIN_STATE.pop(uid,None)
         bot.reply_to(m,"✅ عکس پنل اصلی استارت ذخیره شد.")
+
+    elif state=="set_code_media":
+        if m.content_type == "photo" and m.photo:
+            set_setting("code_media_id", m.photo[-1].file_id)
+            set_setting("code_media_type", "photo")
+        elif m.content_type == "animation" and m.animation:
+            set_setting("code_media_id", m.animation.file_id)
+            set_setting("code_media_type", "animation")
+        else:
+            return bot.reply_to(m,"❌ لطفاً یک عکس یا گیف ارسال کنید.")
+        ADMIN_STATE.pop(uid,None)
+        bot.reply_to(m,"✅ عکس/گیف صفحه کد ذخیره شد.")
 
     elif state=="set_transfer_photo":
         if m.content_type != "photo" or not m.photo:
