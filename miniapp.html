@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>پروفایل سلف</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
+<style>
+  :root {
+    --bg: #07111f;
+    --card: #0c1b30;
+    --card-2: #102340;
+    --line: #1b3354;
+    --blue: #3b9eff;
+    --blue-deep: #1a6dd6;
+    --blue-soft: rgba(59,158,255,.14);
+    --text: #eaf3ff;
+    --muted: #7f97b8;
+    --on: #3ddc97;
+    --off: #ff6b81;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body {
+    font-family: 'Vazirmatn', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 16px 14px 32px;
+    background-image: radial-gradient(ellipse at 50% -10%, rgba(59,158,255,.22), transparent 55%);
+    background-repeat: no-repeat;
+  }
+  .wrap { max-width: 480px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 28px;
+    padding: 22px;
+  }
+
+  /* Profile */
+  .profile { text-align: center; padding: 28px 20px 22px; }
+  .avatar {
+    width: 112px; height: 112px; margin: 0 auto 14px;
+    border-radius: 50%; padding: 4px;
+    background: conic-gradient(from 200deg, var(--blue), #8fd0ff, var(--blue-deep), var(--blue));
+    box-shadow: 0 0 40px rgba(59,158,255,.35);
+  }
+  .avatar > div {
+    width: 100%; height: 100%; border-radius: 50%;
+    background: var(--card-2) center/cover no-repeat;
+    border: 3px solid var(--card);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 40px; font-weight: 800; color: var(--blue);
+  }
+  .name { font-size: 22px; font-weight: 800; }
+  .username { margin-top: 4px; color: var(--muted); font-size: 14px; direction: ltr; }
+  .status {
+    margin-top: 14px; display: inline-flex; align-items: center; gap: 8px;
+    padding: 7px 14px; border-radius: 999px; font-size: 13px; font-weight: 600;
+    background: rgba(255,107,129,.12); color: var(--off);
+  }
+  .status i { width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
+  .status.on { background: rgba(61,220,151,.12); color: var(--on); }
+  .status.on i { box-shadow: 0 0 0 0 rgba(61,220,151,.6); animation: pulse 1.8s infinite; }
+  @keyframes pulse { 70% { box-shadow: 0 0 0 8px rgba(61,220,151,0); } 100% { box-shadow: 0 0 0 0 rgba(61,220,151,0); } }
+
+  /* Balance */
+  .balance-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .balance-label { color: var(--muted); font-size: 13px; }
+  .balance-value { margin-top: 6px; font-size: 38px; font-weight: 800; line-height: 1.2; }
+  .balance-value small { font-size: 18px; font-weight: 600; color: var(--muted); margin-right: 6px; }
+  .gem {
+    width: 60px; height: 60px; border-radius: 20px; flex-shrink: 0;
+    background: var(--blue-soft); border: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .gem svg { width: 30px; height: 30px; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0 16px; }
+
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .stat {
+    background: var(--card-2); border: 1px solid var(--line);
+    border-radius: 20px; padding: 14px 12px;
+  }
+  .stat span { display: block; color: var(--muted); font-size: 12px; }
+  .stat b { display: block; margin-top: 8px; font-size: 20px; font-weight: 800; direction: ltr; text-align: right; }
+
+  /* Account info */
+  .section-title { color: var(--muted); font-size: 14px; padding: 4px 8px 0; }
+  .row { display: flex; align-items: center; gap: 14px; cursor: pointer; }
+  .row .ico {
+    width: 48px; height: 48px; border-radius: 16px; flex-shrink: 0;
+    background: var(--blue-soft); border: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: center; color: var(--blue);
+  }
+  .row .ico svg { width: 22px; height: 22px; }
+  .row .txt { flex: 1; }
+  .row .txt b { display: block; font-size: 15px; }
+  .row .txt span { color: var(--muted); font-size: 12px; }
+  .row .val { color: var(--blue); font-weight: 700; direction: ltr; font-size: 15px; }
+  .row + .row { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translate(-50%, 20px);
+    background: var(--blue); color: #04101f; font-weight: 700; font-size: 13px;
+    padding: 10px 18px; border-radius: 999px; opacity: 0; pointer-events: none;
+    transition: .25s;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  .skeleton { opacity: .5; }
+  @media (prefers-reduced-motion: reduce) { .status.on i { animation: none; } }
+</style>
+</head>
+<body>
+<div class="wrap" id="app">
+
+  <!-- پروفایل -->
+  <section class="card profile">
+    <div class="avatar"><div id="avatar">?</div></div>
+    <div class="name" id="name">...</div>
+    <div class="username" id="username">@</div>
+    <div class="status" id="status"><i></i><span>در حال بارگذاری</span></div>
+  </section>
+
+  <!-- موجودی -->
+  <section class="card">
+    <div class="balance-top">
+      <div class="gem">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#3b9eff" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round">
+          <path d="M6 3h12l4 6-10 12L2 9z"/><path d="M2 9h20M9 3l3 6 3-6M12 21 9 9m3 12 3-12"/>
+        </svg>
+      </div>
+      <div style="text-align:right">
+        <div class="balance-label">ارزش الماس‌ها</div>
+        <div class="balance-value"><span id="toman">0</span><small>تومان</small></div>
+      </div>
+    </div>
+    <hr>
+    <div class="stats">
+      <div class="stat"><span>مصرف ساعتی</span><b id="hourly">2/H</b></div>
+      <div class="stat"><span>الماس</span><b id="diamond">0</b></div>
+      <div class="stat"><span>دعوت‌ها</span><b id="refs">0</b></div>
+    </div>
+  </section>
+
+  <div class="section-title">اطلاعات حساب</div>
+
+  <section class="card">
+    <div class="row" id="copyId">
+      <div class="ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M8 9h8M8 13h8M8 17h4"/></svg>
+      </div>
+      <div class="txt"><b>Telegram ID</b><span>شناسه عددی حساب</span></div>
+      <div class="val" id="uid">#</div>
+    </div>
+    <div class="row">
+      <div class="ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+      </div>
+      <div class="txt"><b>وضعیت سلف</b><span>روشن یا خاموش بودن</span></div>
+      <div class="val" id="statusText">-</div>
+    </div>
+  </section>
+</div>
+<div class="toast" id="toast">شناسه کپی شد</div>
+
+<script>
+/* ============ تنظیمات ============ */
+// آدرس API ربات شما. باید JSON برگردونه:
+// { "balance": 12, "diamond_rate": 5000, "is_active": true, "ref_count": 3, "hourly": 2 }
+// معادل: bal / DIAMOND_RATE / is_active / get_ref_count(user_id) در کد پایتون شما
+const API_URL = "/api/profile";
+
+/* ============ تلگرام ============ */
+const tg = window.Telegram?.WebApp;
+tg?.ready(); tg?.expand();
+tg?.setHeaderColor?.('#07111f');
+tg?.setBackgroundColor?.('#07111f');
+
+// اطلاعات هر کاربر از خود تلگرام خوانده می‌شود
+const tgUser = tg?.initDataUnsafe?.user || { id: '---', first_name: 'کاربر', username: '', photo_url: '' };
+
+const fa = n => Number(n).toLocaleString('en-US');
+const $ = id => document.getElementById(id);
+
+function renderProfile(u) {
+  const full = [u.first_name, u.last_name].filter(Boolean).join(' ');
+  $('name').textContent = full || 'کاربر';
+  $('username').textContent = u.username ? '@' + u.username : '';
+  $('uid').textContent = '#' + u.id;
+  const av = $('avatar');
+  if (u.photo_url) { av.style.backgroundImage = `url("${u.photo_url}")`; av.textContent = ''; }
+  else av.textContent = (u.first_name || '?')[0].toUpperCase();
+}
+
+function renderData(d) {
+  const bal = Number(d.balance || 0);
+  const rate = Number(d.diamond_rate || 0);
+  $('diamond').textContent = fa(bal);
+  $('toman').textContent = fa(bal * rate);
+  $('hourly').textContent = (d.hourly ?? 2) + '/H';
+  $('refs').textContent = fa(d.ref_count || 0);
+
+  const on = !!d.is_active;
+  const st = $('status');
+  st.className = 'status' + (on ? ' on' : '');
+  st.querySelector('span').textContent = on ? 'سلف روشن است' : 'سلف خاموش یا متصل نیست';
+  const t = $('statusText');
+  t.textContent = on ? '✅ فعال' : '❌ غیرفعال';
+  t.style.color = on ? 'var(--on)' : 'var(--off)';
+}
+
+async function load() {
+  renderProfile(tgUser);
+  let data = { balance: 0, diamond_rate: 5000, is_active: false, ref_count: 0, hourly: 2 }; // دمو
+  if (API_URL) {
+    try {
+      const r = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: tg?.initData || '' })
+      });
+      data = await r.json();
+    } catch (e) { console.error(e); }
+  }
+  renderData(data);
+}
+
+$('copyId').addEventListener('click', () => {
+  navigator.clipboard?.writeText(String(tgUser.id));
+  const t = $('toast'); t.classList.add('show');
+  tg?.HapticFeedback?.notificationOccurred('success');
+  setTimeout(() => t.classList.remove('show'), 1400);
+});
+
+load();
+</script>
+</body>
+</html>
