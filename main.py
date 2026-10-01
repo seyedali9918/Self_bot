@@ -2,6 +2,7 @@ import hmac, hashlib, json
 from urllib.parse import parse_qsl
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import sqlite3
 import os
 
@@ -9,6 +10,7 @@ import os
 BOT_TOKEN = "8200221816:AAEy7BSmi08HwAJY7QNLl9WdE6StI90LDqg"
 DIAMOND_RATE = 40
 DB_PATH = os.path.join(os.getcwd(), "data", "vip_bet.db")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ==================== FastAPI ====================
 app = FastAPI()
@@ -68,4 +70,8 @@ async def profile(req: Request):
 
 @app.get("/")
 async def root():
+    return FileResponse(os.path.join(BASE_DIR, "miniapp.html"))
+
+@app.get("/health")
+async def health():
     return {"status": "ok", "message": "VIP Mini App API"}
