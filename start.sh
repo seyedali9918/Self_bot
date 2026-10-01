@@ -1,31 +1,38 @@
 #!/bin/bash
 
 # ============================================
-# اجرای FastAPI (مینی‌اپ) در پس‌زمینه
+# اجرای FastAPI (مینی‌اپ)
 # ============================================
 uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} &
-
-# ذخیره PID مینی‌اپ
 MINIAPP_PID=$!
 
 # ============================================
-# اجرای ربات تلگرام در پس‌زمینه
+# اجرای ربات تلگرام
 # ============================================
 python bot.py &
-
-# ذخیره PID ربات
 BOT_PID=$!
 
-# ============================================
-# نمایش وضعیت
-# ============================================
-echo "✅ Mini App running on port ${PORT:-8000} (PID: $MINIAPP_PID)"
-echo "✅ Bot running (PID: $BOT_PID)"
+echo "✅ Mini App started (PID: $MINIAPP_PID)"
+echo "✅ Bot started (PID: $BOT_PID)"
 
 # ============================================
-# مدیریت خطا: اگه یکی از پروسه‌ها بمیره، همه می‌میرن
+# اگه یکی از پروسه‌ها بمیره، بقیه رو هم بکش
 # ============================================
 trap "kill $MINIAPP_PID $BOT_PID 2>/dev/null; exit" SIGTERM SIGINT
 
-# منتظر موندن تا هر دو پروسه بسته بشن
+# حلقه‌ای که وضعیت رو چک می‌کنه
+while true; do
+    if ! kill -0 $MINIAPP_PID 2>/dev/null; then
+        echo "❌ Mini App died, restarting..."
+        break
+    fi
+    if ! kill -0 $BOT_PID 2>/dev/null; then
+        echo "❌ Bot died, restarting..."
+        break
+    fi
+    sleep 5
+done
+
+# اگه یکی از پروسه‌ها مرد، بقیه رو بکش
+kill $MINIAPP_PID $BOT_PID 2>/dev/null
 wait
