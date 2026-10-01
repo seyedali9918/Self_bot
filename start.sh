@@ -1,17 +1,11 @@
 #!/bin/bash
 
-# ============================================
-# اجرای FastAPI (مینی‌اپ)
-# ============================================
 echo "🚀 Starting Mini App..."
 uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} 2>&1 &
 MINIAPP_PID=$!
 
 sleep 2
 
-# ============================================
-# اجرای ربات تلگرام با -u
-# ============================================
 echo "🚀 Starting Bot..."
 python -u bot.py 2>&1 &
 BOT_PID=$!
@@ -19,9 +13,6 @@ BOT_PID=$!
 echo "✅ Mini App PID: $MINIAPP_PID"
 echo "✅ Bot PID: $BOT_PID"
 
-# ============================================
-# مانیتور پروسه‌ها
-# ============================================
 while true; do
     if ! kill -0 $MINIAPP_PID 2>/dev/null; then
         echo "❌ Mini App died!"
