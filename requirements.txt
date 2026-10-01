@@ -4,4 +4,4 @@ tgcrypto
 aiohttp
 requests
 fastapi
-uvicorn
+uvicorn[standard]
