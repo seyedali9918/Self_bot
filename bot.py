@@ -17,21 +17,30 @@ import html
 import logging
 import time
 import random
+import os
+import re
+import json
+import requests
+from datetime import datetime, timezone, timedelta
+
+import telebot
+from telebot import types
+from pyrogram import Client, filters, enums
+from pyrogram.types import Message as PyroMessage, InlineQueryResultArticle, InputTextMessageContent
+from pyrogram.errors import SessionPasswordNeeded, FloodWait
+from pyrogram.handlers import MessageHandler
+from pyrogram.raw.types import MessageEntityBlockquote, MessageEntityCustomEmoji, MessageEntitySpoiler
+import sqlite3
+import threading
+import html
+import logging
+import time
+import random
 import asyncio
 import os
 import re
 import json
 import requests
-try:
-    import yt_dlp
-    YTDLP_AVAILABLE = True
-except Exception:
-    YTDLP_AVAILABLE = False
-try:
-    import speech_recognition as sr
-    SR_AVAILABLE = True
-except Exception:
-    SR_AVAILABLE = False
 from datetime import datetime, timezone, timedelta
 
 import telebot
@@ -86,9 +95,6 @@ temp_data = {}
 AUTH_FLOOD_UNTIL = {}  # uid -> unix timestamp; prevents repeated SendCode attempts
 SELF_TASKS = {}
 POSTER_TASKS = {}  # uid -> asyncio.Task حلقه ارسال خودکار «تبچی گروهی»
-MEOW_TASKS = {}
-PISHI_TASKS = {}
-MAHI_TASKS = {}
 ADMIN_STATE = {}
 
 # وضعیت‌های runtime سلف (دستورات راهنمای AX)
@@ -156,73 +162,6 @@ def cb_noop(c: types.CallbackQuery):
         bot.answer_callback_query(c.id)
     except Exception:
         pass
-
-# ---------- سرچ موزیک / دانلودر (بر پایه yt-dlp، سمت خود بات) ----------
-MUSIC_STATE = {}  # uid -> "search" | "download"
-
-def _music_back_markup(uid):
-    kb = types.InlineKeyboardMarkup()
-    kb.add(_btn("🔙 بازگشت به پنل بزرگ", style="danger", callback_data=f"axp:sec_back:{uid}"))
-    return kb
-
-def _ytdlp_fetch(url, audio_only):
-    """لینک یوتیوب/اینستاگرام رو می‌گیره؛ audio_only=True یعنی فقط صدا (mp3)، در غیر این صورت کل ویدیو."""
-    out_tmpl = os.path.join(DATA_DIR, "ytdl_%(id)s.%(ext)s")
-    ydl_opts = {
-        "outtmpl": out_tmpl,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "format": "bestaudio/best" if audio_only else "best[ext=mp4]/best",
-    }
-    if audio_only:
-        ydl_opts["postprocessors"] = [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }]
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        if audio_only:
-            base, _ = os.path.splitext(filename)
-            mp3_path = base + ".mp3"
-            if os.path.exists(mp3_path):
-                filename = mp3_path
-        title = info.get("title") or "download"
-    return filename, title
-
-@bot.message_handler(func=lambda m: m.chat.type == "private" and m.from_user and m.from_user.id in MUSIC_STATE and m.text)
-def music_link_handler(m: types.Message):
-    uid = m.from_user.id
-    mode = MUSIC_STATE.pop(uid, None)
-    url = m.text.strip()
-    if not url.startswith("http"):
-        return bot.reply_to(m, "❌ لطفاً یک لینک معتبر یوتیوب یا اینستاگرام بفرستید.")
-    if not YTDLP_AVAILABLE:
-        return bot.reply_to(m, "❌ قابلیت دانلود روی سرور فعال نیست (yt-dlp نصب نشده). به ادمین اطلاع بده: pip install yt-dlp")
-    wait_msg = bot.reply_to(m, "⏳ در حال پردازش لینک...")
-    try:
-        filename, title = _ytdlp_fetch(url, audio_only=(mode == "search"))
-        with open(filename, "rb") as f:
-            if mode == "search":
-                bot.send_audio(m.chat.id, f, title=title, reply_markup=_music_back_markup(uid))
-            else:
-                bot.send_video(m.chat.id, f, caption=title, reply_markup=_music_back_markup(uid))
-        try:
-            os.remove(filename)
-        except Exception:
-            pass
-        try:
-            bot.delete_message(m.chat.id, wait_msg.message_id)
-        except Exception:
-            pass
-    except Exception as e:
-        logging.debug("ytdlp fetch failed: %s", e)
-        try:
-            bot.edit_message_text("❌ نتیجه یافت نشد.", m.chat.id, wait_msg.message_id, reply_markup=_music_back_markup(uid))
-        except Exception:
-            bot.reply_to(m, "❌ نتیجه یافت نشد.")
 
 def _login_loop_worker():
     asyncio.set_event_loop(LOGIN_LOOP)
@@ -330,14 +269,6 @@ def init_db():
             "poster_text": "ALTER TABLE self_settings ADD COLUMN poster_text TEXT DEFAULT ''",
             "poster_interval": "ALTER TABLE self_settings ADD COLUMN poster_interval INTEGER DEFAULT 60",
             "poster_chat_id": "ALTER TABLE self_settings ADD COLUMN poster_chat_id INTEGER DEFAULT 0",
-            "meow_chat_id": "ALTER TABLE self_settings ADD COLUMN meow_chat_id INTEGER DEFAULT 0",
-            "meow_interval": "ALTER TABLE self_settings ADD COLUMN meow_interval INTEGER DEFAULT 300",
-            "pishi_chat_id": "ALTER TABLE self_settings ADD COLUMN pishi_chat_id INTEGER DEFAULT 0",
-            "pishi_interval": "ALTER TABLE self_settings ADD COLUMN pishi_interval INTEGER DEFAULT 1800",
-            "mahi_chat_id": "ALTER TABLE self_settings ADD COLUMN mahi_chat_id INTEGER DEFAULT 0",
-            "mahi_interval": "ALTER TABLE self_settings ADD COLUMN mahi_interval INTEGER DEFAULT 2700",
-            "mahi_action": "ALTER TABLE self_settings ADD COLUMN mahi_action TEXT DEFAULT ''",
-            "voice_to_text": "ALTER TABLE self_settings ADD COLUMN voice_to_text INTEGER DEFAULT 0",
         }
         for col, sql in extra_cols.items():
             if col not in cols:
@@ -507,9 +438,7 @@ def get_self_settings(uid: int):
                               bold_mode,auto_save,anti_report,enemy_active,friend_active,crash_active,pv_lock,
                               pv_photo,pv_video,pv_gif,pv_voice,pv_music,pv_sticker,pv_doc,
                               enemy_list,friend_list,crash_list,enemy_replies,friend_replies,crash_replies,
-                              poster_on,poster_text,poster_interval,poster_chat_id,
-                              meow_chat_id,meow_interval,pishi_chat_id,pishi_interval,
-                              mahi_chat_id,mahi_interval,mahi_action,voice_to_text
+                              poster_on,poster_text,poster_interval,poster_chat_id
                        FROM self_settings WHERE user_id=?""", (uid,))
         r = cur.fetchone()
         if not r:
@@ -519,9 +448,7 @@ def get_self_settings(uid: int):
               'bold_mode','auto_save','anti_report','enemy_active','friend_active','crash_active','pv_lock',
               'pv_photo','pv_video','pv_gif','pv_voice','pv_music','pv_sticker','pv_doc',
               'enemy_list','friend_list','crash_list','enemy_replies','friend_replies','crash_replies',
-              'poster_on','poster_text','poster_interval','poster_chat_id',
-              'meow_chat_id','meow_interval','pishi_chat_id','pishi_interval',
-              'mahi_chat_id','mahi_interval','mahi_action','voice_to_text']
+              'poster_on','poster_text','poster_interval','poster_chat_id']
         d=dict(zip(keys,r))
         for k in ('enemy_list','friend_list','crash_list','enemy_replies','friend_replies','crash_replies'):
             try: d[k]=json.loads(d.get(k) or '[]')
@@ -1042,22 +969,30 @@ def generate_ax_panel_markup(uid):
         _btn(f"منشی {c(s.get('is_auto_reply_on'))}", style=st(s.get('is_auto_reply_on')), callback_data=f"axp:reply:{uid}"),
         _btn("🎭 سین/تایپ/بازی", style="primary", callback_data=f"axp:sec_behavior:{uid}")
     )
-    kb.row(_btn(f"🎙 ویس به متن {c(s.get('voice_to_text'))}", style=st(s.get('voice_to_text')), callback_data=f"axp:voicetext:{uid}"))
     kb.row(_btn(f"ذخیره خودکار {c(s.get('auto_save'))}", style=st(s.get('auto_save')), callback_data=f"axp:autosave:{uid}"))
     kb.row(_btn(f"سپر ضد ریپ {c(s.get('anti_report',1))}", style=st(s.get('anti_report',1)), callback_data=f"axp:antireport:{uid}"))
     kb.row(
-        _btn("👤 دشمن/دوست/کراش", style="primary", callback_data=f"axp:sec_efc:{uid}"),
-        _btn("🔒 قفل‌های پیوی", style="primary", callback_data=f"axp:sec_lock:{uid}")
+        _btn(f"دشمن {c(s.get('enemy_active'))}", style=st(s.get('enemy_active')), callback_data=f"axp:enemy:{uid}"),
+        _btn(f"دوست {c(s.get('friend_active'))}", style=st(s.get('friend_active')), callback_data=f"axp:friend:{uid}"),
+        _btn(f"کراش {c(s.get('crash_active'))}", style=st(s.get('crash_active')), callback_data=f"axp:crash:{uid}")
     )
     kb.row(
         _btn(f"📢 تبچی {c(s.get('poster_on'))}", style=st(s.get('poster_on')), callback_data=f"axp:poster:{uid}"),
         _btn("🗑 پاکسازی تبچی", style="danger", callback_data=f"axp:posterclear:{uid}")
     )
-    kb.row(_btn("🐱 میو/پیشی/ماهی", style="primary", callback_data=f"axp:sec_meow:{uid}"))
+    kb.row(_btn(f"🔒 قفل کل پیوی {c(s.get('pv_lock'))}", style=st(s.get('pv_lock')), callback_data=f"axp:pvlock:{uid}"))
+    kb.row(_btn("🔻 قفل‌های رسانه پیوی 🔻", style="primary", callback_data="axp:none:"+str(uid)))
     kb.row(
-        _btn("🎵 سرچ موزیک", style="primary", callback_data=f"axp:music_search:{uid}"),
-        _btn("⬇️ دانلودر", style="primary", callback_data=f"axp:music_download:{uid}")
+        _btn(f"عکس {c(s.get('pv_photo'))}", style=st(s.get('pv_photo')), callback_data=f"axp:media_photo:{uid}"),
+        _btn(f"ویدیو {c(s.get('pv_video'))}", style=st(s.get('pv_video')), callback_data=f"axp:media_video:{uid}"),
+        _btn(f"گیف {c(s.get('pv_gif'))}", style=st(s.get('pv_gif')), callback_data=f"axp:media_gif:{uid}")
     )
+    kb.row(
+        _btn(f"ویس {c(s.get('pv_voice'))}", style=st(s.get('pv_voice')), callback_data=f"axp:media_voice:{uid}"),
+        _btn(f"موزیک {c(s.get('pv_music'))}", style=st(s.get('pv_music')), callback_data=f"axp:media_music:{uid}"),
+        _btn(f"استیکر {c(s.get('pv_sticker'))}", style=st(s.get('pv_sticker')), callback_data=f"axp:media_sticker:{uid}")
+    )
+    kb.row(_btn(f"فایل {c(s.get('pv_doc'))}", style=st(s.get('pv_doc')), callback_data=f"axp:media_doc:{uid}"))
     kb.row(
         _btn("📊 وضعیت سلف", style="primary", callback_data=f"axp:status:{uid}"),
         _btn("🔄 بروزرسانی", style="primary", callback_data=f"axp:refresh:{uid}")
@@ -1132,70 +1067,6 @@ def render_behavior_section(uid):
     kb.row(_btn("تایپ", style=sty("typing"), callback_data=f"axp:typingon:{uid}"))
     kb.row(_btn("بازی", style=sty("game"), callback_data=f"axp:gameon:{uid}"))
     kb.row(_btn("هیچکدام (خاموش)", style=sty("none"), callback_data=f"axp:behavnone:{uid}"))
-    kb.row(_btn("🔙 بازگشت به پنل بزرگ", style="danger", callback_data=f"axp:sec_back:{uid}"))
-    return text, kb
-
-def render_efc_section(uid):
-    s = get_self_settings(uid)
-    def c(v): return "✅" if bool(v) else "❌"
-    def st(v): return "success" if bool(v) else "danger"
-    text = (
-        "👤 <b>بخش دشمن/دوست/کراش</b>\n\n"
-        "هر کدوم مستقل روشن/خاموش میشه. برای اضافه/حذف افراد از لیست هرکدوم، دستورات راهنما رو ببین."
-    )
-    kb = types.InlineKeyboardMarkup()
-    kb.row(
-        _btn(f"دشمن {c(s.get('enemy_active'))}", style=st(s.get('enemy_active')), callback_data=f"axp:enemy:{uid}"),
-        _btn(f"دوست {c(s.get('friend_active'))}", style=st(s.get('friend_active')), callback_data=f"axp:friend:{uid}"),
-        _btn(f"کراش {c(s.get('crash_active'))}", style=st(s.get('crash_active')), callback_data=f"axp:crash:{uid}")
-    )
-    kb.row(_btn("🔙 بازگشت به پنل بزرگ", style="danger", callback_data=f"axp:sec_back:{uid}"))
-    return text, kb
-
-def render_lock_section(uid):
-    s = get_self_settings(uid)
-    def c(v): return "✅" if bool(v) else "❌"
-    def st(v): return "success" if bool(v) else "danger"
-    text = (
-        "🔒 <b>بخش قفل‌های پیوی</b>\n\n"
-        "«قفل کل پیوی» همه چیز رو مسدود می‌کنه؛ قفل‌های زیرش فقط همون نوع رسانه رو مسدود می‌کنن."
-    )
-    kb = types.InlineKeyboardMarkup()
-    kb.row(_btn(f"🔒 قفل کل پیوی {c(s.get('pv_lock'))}", style=st(s.get('pv_lock')), callback_data=f"axp:pvlock:{uid}"))
-    kb.row(
-        _btn(f"عکس {c(s.get('pv_photo'))}", style=st(s.get('pv_photo')), callback_data=f"axp:media_photo:{uid}"),
-        _btn(f"ویدیو {c(s.get('pv_video'))}", style=st(s.get('pv_video')), callback_data=f"axp:media_video:{uid}"),
-        _btn(f"گیف {c(s.get('pv_gif'))}", style=st(s.get('pv_gif')), callback_data=f"axp:media_gif:{uid}")
-    )
-    kb.row(
-        _btn(f"ویس {c(s.get('pv_voice'))}", style=st(s.get('pv_voice')), callback_data=f"axp:media_voice:{uid}"),
-        _btn(f"موزیک {c(s.get('pv_music'))}", style=st(s.get('pv_music')), callback_data=f"axp:media_music:{uid}"),
-        _btn(f"استیکر {c(s.get('pv_sticker'))}", style=st(s.get('pv_sticker')), callback_data=f"axp:media_sticker:{uid}")
-    )
-    kb.row(_btn(f"فایل {c(s.get('pv_doc'))}", style=st(s.get('pv_doc')), callback_data=f"axp:media_doc:{uid}"))
-    kb.row(_btn("🔙 بازگشت به پنل بزرگ", style="danger", callback_data=f"axp:sec_back:{uid}"))
-    return text, kb
-
-def render_meow_section(uid):
-    s = get_self_settings(uid)
-    def row(label, chat_id, extra=""):
-        if chat_id:
-            return f"{label}: فعال در گروه <code>{chat_id}</code>{extra}"
-        return f"{label}: غیرفعال"
-    mahi_extra = f" (عملیات: {MAHI_ACTIONS.get(s.get('mahi_action',''), '-')})" if s.get("mahi_chat_id") else ""
-    text = (
-        "🐱 <b>بخش میو / پیشی / ماهی</b>\n\n"
-        f"{row('میو', s.get('meow_chat_id'))}\n"
-        f"{row('پیشی', s.get('pishi_chat_id'))}\n"
-        f"{row('ماهی', s.get('mahi_chat_id'), mahi_extra)}\n\n"
-        "تنظیم/پاکسازی این‌ها فقط با دستور متنی داخل همون گروه انجام می‌شود (راهنما رو ببین)، نه با دکمه."
-    )
-    kb = types.InlineKeyboardMarkup()
-    kb.row(
-        _btn("🗑 پاکسازی میو", style="danger", callback_data=f"axp:meowclear:{uid}"),
-        _btn("🗑 پاکسازی پیشی", style="danger", callback_data=f"axp:pishiclear:{uid}")
-    )
-    kb.row(_btn("🗑 پاکسازی ماهی", style="danger", callback_data=f"axp:mahiclear:{uid}"))
     kb.row(_btn("🔙 بازگشت به پنل بزرگ", style="danger", callback_data=f"axp:sec_back:{uid}"))
     return text, kb
 
@@ -1326,7 +1197,6 @@ def ax_panel_callback(c):
         toggle_map = {
             "clock": "is_clock_on", "reply": "is_auto_reply_on", "bio": "is_bio_on",
             "seen": "is_seen_on", "typing": "is_typing_on", "antiraid": "anti_raid",
-            "voicetext": "voice_to_text",
             "autosave": "auto_save", "antireport": "anti_report",
             "enemy": "enemy_active", "friend": "friend_active", "crash": "crash_active",
             "pvlock": "pv_lock", "media_photo": "pv_photo", "media_video": "pv_video",
@@ -1345,14 +1215,6 @@ def ax_panel_callback(c):
                     except Exception:
                         pass
             run_self_message(uid, f"✅ {key} {'روشن' if value else 'خاموش'} شد")
-            if action in {"enemy","friend","crash"}:
-                text, markup = render_efc_section(uid)
-                _edit_current_view(c, text, markup)
-                return bot.answer_callback_query(c.id, "✅ انجام شد")
-            if action in {"pvlock","media_photo","media_video","media_gif","media_voice","media_music","media_sticker","media_doc"}:
-                text, markup = render_lock_section(uid)
-                _edit_current_view(c, text, markup)
-                return bot.answer_callback_query(c.id, "✅ انجام شد")
         elif action in {"bold","quote","spoiler"}:
             # این سه حالت متن با هم انحصاری‌اند (فقط یکی می‌تواند فعال باشد)؛ روی همون فیلد text_mode ذخیره می‌شن.
             mode = action if s.get("text_mode") != action else "normal"
@@ -1409,37 +1271,6 @@ def ax_panel_callback(c):
             text, markup = render_behavior_section(uid)
             _edit_current_view(c, text, markup)
             return bot.answer_callback_query(c.id, "✅ انجام شد")
-        elif action in {"music_search","music_download"}:
-            MUSIC_STATE[uid] = "search" if action == "music_search" else "download"
-            label = "🎵 سرچ موزیک" if action == "music_search" else "⬇️ دانلودر"
-            kb = types.InlineKeyboardMarkup()
-            kb.add(_btn("❌ لغو", style="danger", callback_data=f"axp:sec_back:{uid}"))
-            _edit_current_view(c, f"{label}\n\nلینک ویدیو یوتیوب یا اینستاگرام مورد نظر خود را بفرستید:", kb)
-            return bot.answer_callback_query(c.id)
-        elif action == "sec_meow":
-            text, markup = render_meow_section(uid)
-            _edit_current_view(c, text, markup)
-            return bot.answer_callback_query(c.id)
-        elif action in {"meowclear","pishiclear","mahiclear"}:
-            if action == "meowclear":
-                set_self_settings(uid, "meow_chat_id", 0)
-            elif action == "pishiclear":
-                set_self_settings(uid, "pishi_chat_id", 0)
-            else:
-                set_self_settings(uid, "mahi_chat_id", 0)
-                set_self_settings(uid, "mahi_action", "")
-            run_self_message(uid, "🗑 پاک شد.")
-            text, markup = render_meow_section(uid)
-            _edit_current_view(c, text, markup)
-            return bot.answer_callback_query(c.id, "✅ انجام شد")
-        elif action == "sec_efc":
-            text, markup = render_efc_section(uid)
-            _edit_current_view(c, text, markup)
-            return bot.answer_callback_query(c.id)
-        elif action == "sec_lock":
-            text, markup = render_lock_section(uid)
-            _edit_current_view(c, text, markup)
-            return bot.answer_callback_query(c.id)
         elif action == "sec_behavior":
             text, markup = render_behavior_section(uid)
             _edit_current_view(c, text, markup)
@@ -1453,7 +1284,6 @@ def ax_panel_callback(c):
             _edit_current_view(c, text, markup)
             return bot.answer_callback_query(c.id)
         elif action == "sec_back":
-            MUSIC_STATE.pop(uid, None)
             _edit_current_view(c, ax_panel_text(uid), generate_ax_panel_markup(uid))
             return bot.answer_callback_query(c.id)
         elif action == "poster":
@@ -1563,15 +1393,6 @@ HELP_TEXT = """[ 🛠 راهنمای پیشرفته سلف بات ]
 » <code>پاکسازی تبچی</code> : حذف کامل تنظیمات تبچی (متن، گروه و فاصله زمانی)
 » روشن/خاموش و پاکسازی تبچی از دکمه‌های «تبچی» و «پاکسازی تبچی» داخل <code>پنل</code> هم قابل انجام است
 
-✦ میو / پیشی / ماهی (نیازمند حضور و ادمین‌بودن ربات @MeowieQVBot در همان گروه)
-» <code>تنظیم میو</code> : هر ۵ دقیقه کلمه‌ی «میو» در همین گروه ارسال می‌شود
-» <code>پاکسازی میو</code>
-» <code>تنظیم پیشی [دقیقه]</code> : پیش‌فرض ۳۰ دقیقه؛ «پیشی» می‌فرستد و دکمه‌ی برداشت میوپوینت‌ها را می‌زند
-» <code>پاکسازی پیشی</code>
-» <code>تنظیم ماهی فروش|پیشی|یخچال [دقیقه]</code> : پیش‌فرض ۴۵ دقیقه؛ «ماهی» می‌فرستد و یکی از سه گزینه (فروش ماهی/بده پیشی بخوره/بنداز تو یخچال) را می‌زند
-» <code>پاکسازی ماهی</code>
-» هرکدام فقط در یک گروه همزمان قابل تنظیم است؛ برای تغییر گروه، اول در گروه قبلی پاکسازی کنید
-
 ✦ منشی و ترجمه
 » <code>تنظیم متن منشی [متن]</code> : تغییر پیام پاسخ خودکار منشی
 » منشی با سپر ضد ریپ و تأخیر طبیعی اجرا می‌شود
@@ -1608,7 +1429,6 @@ HELP_COPY_COMMANDS = [
     "تنظیم متن منشی [متن]", "بلاک روشن", "بلاک خاموش", "سکوت روشن", "سکوت خاموش",
     "ریاکشن ❤️", "ریاکشن خاموش",
     "تنظیم تبچی [ثانیه] [متن]", "پاکسازی تبچی",
-    "تنظیم میو", "پاکسازی میو", "تنظیم پیشی", "تنظیم ماهی فروش",
     "تنظیم دشمن", "حذف دشمن", "لیست دشمن", "پاکسازی لیست دشمن", "تنظیم متن دشمن [متن]", "حذف متن دشمن [عدد]",
     "تنظیم دوست", "حذف دوست", "لیست دوست", "پاکسازی لیست دوست", "تنظیم متن دوست [متن]", "حذف متن دوست [عدد]",
     "تنظیم کراش", "حذف کراش", "لیست کراش", "پاکسازی لیست کراش", "تنظیم متن کراش [متن]", "حذف متن کراش [عدد]",
@@ -1789,158 +1609,12 @@ async def _group_poster_loop(client, uid):
         return
     except Exception:
         logging.exception("group poster loop stopped for %s", uid)
-
-MEOWIE_BOT_USERNAME = "MeowieQVBot"
-
-async def _meowie_bot_is_admin(client, chat_id):
-    """بررسی اینکه ربات @MeowieQVBot داخل این گروه هست و ادمین هست یا نه."""
-    try:
-        member = await client.get_chat_member(chat_id, MEOWIE_BOT_USERNAME)
-        return member.status in (enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER)
-    except Exception as e:
-        logging.debug("meowie admin check failed for %s: %s", chat_id, e)
-        return False
-
-async def _click_meowie_button(client, chat_id, trigger_word, button_match, wait_seconds=6):
-    """کلمه رو داخل گروه می‌فرسته، منتظر جواب @MeowieQVBot می‌مونه و روی دکمه‌ی مشخص‌شده کلیک می‌کنه."""
-    try:
-        await client.send_message(chat_id, trigger_word)
-    except Exception as e:
-        logging.debug("meowie trigger send failed for %s: %s", chat_id, e)
-        return False
-    await asyncio.sleep(wait_seconds)
-    try:
-        async for msg in client.get_chat_history(chat_id, limit=8):
-            sender = msg.from_user
-            if not sender or not sender.username or sender.username.lower() != MEOWIE_BOT_USERNAME.lower():
-                continue
-            if not msg.reply_markup or not getattr(msg.reply_markup, "inline_keyboard", None):
-                continue
-            for row in msg.reply_markup.inline_keyboard:
-                for btn in row:
-                    if button_match in (btn.text or ""):
-                        try:
-                            await client.request_callback_answer(chat_id, msg.id, btn.callback_data)
-                            return True
-                        except Exception as e:
-                            logging.debug("meowie button click failed for %s: %s", chat_id, e)
-                            return False
-            break  # جدیدترین پیام خودِ بات رو چک کردیم، همین کافیه
-    except Exception as e:
-        logging.debug("meowie history read failed for %s: %s", chat_id, e)
-    return False
-
-async def _meow_loop(client, uid):
-    try:
-        while is_self_active(uid):
-            s = get_self_settings(uid)
-            chat_id = s.get("meow_chat_id")
-            interval = max(60, int(s.get("meow_interval") or 300))
-            if chat_id:
-                try:
-                    await client.send_message(int(chat_id), "میو")
-                except Exception as e:
-                    logging.debug("meow send failed for %s: %s", uid, e)
-                await asyncio.sleep(interval)
-            else:
-                await asyncio.sleep(10)
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        logging.exception("meow loop stopped for %s", uid)
-
-async def _pishi_loop(client, uid):
-    try:
-        while is_self_active(uid):
-            s = get_self_settings(uid)
-            chat_id = s.get("pishi_chat_id")
-            interval = max(60, int(s.get("pishi_interval") or 1800))
-            if chat_id:
-                await _click_meowie_button(client, int(chat_id), "پیشی", "برداشت میوپوینت")
-                await asyncio.sleep(interval)
-            else:
-                await asyncio.sleep(10)
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        logging.exception("pishi loop stopped for %s", uid)
-
-MAHI_ACTIONS = {
-    "فروش": "فروش ماهی",
-    "پیشی": "بده پیشی بخوره",
-    "یخچال": "بنداز تو یخچال",
-}
-
-async def _mahi_loop(client, uid):
-    try:
-        while is_self_active(uid):
-            s = get_self_settings(uid)
-            chat_id = s.get("mahi_chat_id")
-            interval = max(60, int(s.get("mahi_interval") or 2700))
-            action_key = (s.get("mahi_action") or "").strip()
-            button_match = MAHI_ACTIONS.get(action_key, "")
-            if chat_id and button_match:
-                await _click_meowie_button(client, int(chat_id), "ماهی", button_match)
-                await asyncio.sleep(interval)
-            else:
-                await asyncio.sleep(10)
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        logging.exception("mahi loop stopped for %s", uid)
-
-async def _process_voice_to_text(client, message, uid):
-    """ویس پیوی رو به متن تبدیل می‌کنه و متن رو به چت خصوصی خودِ کاربر با بات می‌فرسته."""
-    if not SR_AVAILABLE:
-        return
-    ogg_path = None
-    wav_path = None
-    try:
-        ogg_path = await message.download(file_name=os.path.join(DATA_DIR, f"voice_{uid}_{message.id}.ogg"))
-        wav_path = ogg_path.rsplit(".", 1)[0] + ".wav"
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-i", ogg_path, wav_path,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-        )
-        await proc.wait()
-        recognizer = sr.Recognizer()
-        with sr.AudioFile(wav_path) as source:
-            audio = recognizer.record(source)
-        text = None
-        for lang in ("fa-IR", "en-US"):
-            try:
-                text = recognizer.recognize_google(audio, language=lang)
-                if text:
-                    break
-            except Exception:
-                continue
-        sender_name = (message.from_user.first_name or "ناشناس") if message.from_user else "ناشناس"
-        if text:
-            bot.send_message(uid, f"🎙 متن ویس از {sender_name}:\n\n{text}")
-        else:
-            bot.send_message(uid, f"🎙 ویس از {sender_name} دریافت شد ولی تشخیص متن ممکن نشد.")
-    except Exception as e:
-        logging.debug("voice to text failed for %s: %s", uid, e)
-        try:
-            bot.send_message(uid, "❌ تبدیل ویس به متن با خطا مواجه شد (ffmpeg یا speech_recognition نصب نیست یا مشکلی پیش آمد).")
-        except Exception:
-            pass
-    finally:
-        for p in (ogg_path, wav_path):
-            if p and os.path.exists(p):
-                try: os.remove(p)
-                except Exception: pass
-
 async def _incoming_features(client, message, uid):
     if not message.from_user or message.from_user.is_bot or message.outgoing:
         return
     sender_id = message.from_user.id
     chat_id = message.chat.id if message.chat else 0
     s = get_self_settings(uid)
-
-    # ویس به متن: فقط پیوی، وقتی قابلیت روشن باشه
-    if message.chat and message.chat.type == enums.ChatType.PRIVATE and message.voice and s.get("voice_to_text"):
-        await _process_voice_to_text(client, message, uid)
 
     # ریاکشن خودکار روی شخص مشخص‌شده
     # از دیتابیس هم بازیابی می‌کنیم تا بعد از ری‌استارت سلف تنظیمات از بین نرود.
@@ -2174,61 +1848,6 @@ async def _self_runtime_handler(client, message):
         set_self_settings(uid, "poster_text", txt)
         set_self_settings(uid, "poster_chat_id", message.chat.id)
         return await message.edit_text(f"✅ تبچی تنظیم شد.\n⏱ هر {sec} ثانیه در همین گروه ارسال می‌شود.\nبرای روشن/خاموش کردنش از «پنل» استفاده کنید.")
-
-    # میو
-    if low == "پاکسازی میو":
-        set_self_settings(uid, "meow_chat_id", 0)
-        return await message.edit_text("🗑 میو پاک شد.")
-    if low == "تنظیم میو":
-        if not message.chat or message.chat.type not in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
-            return await message.edit_text("❌ این دستور فقط داخل گروه کار می‌کند.")
-        if s.get("meow_chat_id") and int(s.get("meow_chat_id")) != message.chat.id:
-            return await message.edit_text("❌ ابتدا میو را در گپ قبلی حذف کنید. (دستور «پاکسازی میو» در همون گروه)")
-        if not await _meowie_bot_is_admin(client, message.chat.id):
-            return await message.edit_text(f"❌ ربات @{MEOWIE_BOT_USERNAME} باید داخل این گروه و ادمین باشد.")
-        set_self_settings(uid, "meow_chat_id", message.chat.id)
-        set_self_settings(uid, "meow_interval", 300)
-        return await message.edit_text("✅ میو تنظیم شد.\n⏱ هر ۵ دقیقه کلمه‌ی «میو» ارسال می‌شود.")
-
-    # پیشی
-    if low == "پاکسازی پیشی":
-        set_self_settings(uid, "pishi_chat_id", 0)
-        return await message.edit_text("🗑 پیشی پاک شد.")
-    m=re.match(r"^تنظیم پیشی(?:\s+(\d+))?$",cmd)
-    if m:
-        if not message.chat or message.chat.type not in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
-            return await message.edit_text("❌ این دستور فقط داخل گروه کار می‌کند.")
-        if s.get("pishi_chat_id") and int(s.get("pishi_chat_id")) != message.chat.id:
-            return await message.edit_text("❌ ابتدا پیشی را در گپ قبلی حذف کنید. (دستور «پاکسازی پیشی» در همون گروه)")
-        if not await _meowie_bot_is_admin(client, message.chat.id):
-            return await message.edit_text(f"❌ ربات @{MEOWIE_BOT_USERNAME} باید داخل این گروه و ادمین باشد.")
-        minutes = max(1, int(m.group(1))) if m.group(1) else 30
-        set_self_settings(uid, "pishi_chat_id", message.chat.id)
-        set_self_settings(uid, "pishi_interval", minutes*60)
-        return await message.edit_text(f"✅ پیشی تنظیم شد.\n⏱ هر {minutes} دقیقه «پیشی» ارسال و دکمه‌ی برداشت میوپوینت‌ها زده می‌شود.")
-
-    # ماهی
-    if low == "پاکسازی ماهی":
-        set_self_settings(uid, "mahi_chat_id", 0)
-        set_self_settings(uid, "mahi_action", "")
-        return await message.edit_text("🗑 ماهی پاک شد.")
-    m=re.match(r"^تنظیم ماهی\s+(فروش|پیشی|یخچال)(?:\s+(\d+))?$",cmd)
-    if m:
-        if not message.chat or message.chat.type not in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
-            return await message.edit_text("❌ این دستور فقط داخل گروه کار می‌کند.")
-        if s.get("mahi_chat_id") and int(s.get("mahi_chat_id")) != message.chat.id:
-            return await message.edit_text("❌ ابتدا ماهی را در گپ قبلی حذف کنید. (دستور «پاکسازی ماهی» در همون گروه)")
-        if not await _meowie_bot_is_admin(client, message.chat.id):
-            return await message.edit_text(f"❌ ربات @{MEOWIE_BOT_USERNAME} باید داخل این گروه و ادمین باشد.")
-        action_key, mins = m.groups()
-        minutes = max(1, int(mins)) if mins else 45
-        set_self_settings(uid, "mahi_chat_id", message.chat.id)
-        set_self_settings(uid, "mahi_interval", minutes*60)
-        set_self_settings(uid, "mahi_action", action_key)
-        return await message.edit_text(
-            f"✅ ماهی تنظیم شد.\n⏱ هر {minutes} دقیقه «ماهی» ارسال و دکمه‌ی «{MAHI_ACTIONS[action_key]}» زده می‌شود."
-        )
-
 # دشمن/دوست/کراش
     m=re.match(r"^(تنظیم|حذف) (دشمن|دوست|کراش)$", cmd)
     if m:
@@ -2439,12 +2058,6 @@ async def _attach_self_runtime(client, uid):
         try: old_poster.cancel()
         except Exception: pass
     POSTER_TASKS[uid]=asyncio.create_task(_group_poster_loop(client,uid))
-    for task_dict, loop_fn in ((MEOW_TASKS,_meow_loop),(PISHI_TASKS,_pishi_loop),(MAHI_TASKS,_mahi_loop)):
-        old_t=task_dict.pop(uid,None)
-        if old_t:
-            try: old_t.cancel()
-            except Exception: pass
-        task_dict[uid]=asyncio.create_task(loop_fn(client,uid))
 
 async def self_panel_command_controller(client, message):
     """پنل شیشه‌ای؛ مخصوصاً برای Saved Messages با fallback مطمئن."""
@@ -2892,10 +2505,6 @@ def cb_self(c):
                 cur.execute("UPDATE users SET is_self_active=1, self_active_time=? WHERE user_id=?", (int(time.time()), user_id))
                 conn.commit()
         try:
-            run_login_coro(_attach_self_runtime(live, user_id))
-        except Exception:
-            pass
-        try:
             run_login_coro(_send_premium_welcome(live, user_id))
         except Exception:
             pass
@@ -2914,11 +2523,6 @@ def cb_self(c):
         if poster_task:
             try: poster_task.cancel()
             except Exception: pass
-        for task_dict in (MEOW_TASKS, PISHI_TASKS, MAHI_TASKS):
-            t = task_dict.pop(user_id, None)
-            if t:
-                try: t.cancel()
-                except Exception: pass
         if live:
             async def _restore_and_stop():
                 try:
