@@ -43,7 +43,7 @@ from pyrogram.handlers import MessageHandler
 from pyrogram.raw.types import MessageEntityBlockquote, MessageEntityCustomEmoji, MessageEntitySpoiler
 
 # ----------------- CONFIG -----------------
-BOT_TOKEN = "8846145059:AAGLLYBS21rPEJ4iXJSRuz3bgRkLqT-okU0"
+BOT_TOKEN = "8200221816:AAGJZrs4yMI4lEIhODo9gAoBvN0ZJln_454"
 OWNER_ID = 5552127428
 DEVELOPER_ID = 5552127428
 ADMIN_IDS = [OWNER_ID, DEVELOPER_ID]
