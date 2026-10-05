@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 # ==================== تنظیمات ====================
-BOT_TOKEN = "8200221816:AAEy7BSmi08HwAJY7QNLl9WdE6StI90LDqg"
+BOT_TOKEN = "8846145059:AAGLLYBS21rPEJ4iXJSRuz3bgRkLqT-okU0"
 DIAMOND_RATE = 40
 DB_PATH = os.path.join(os.getcwd(), "data", "vip_bet.db")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -59,6 +59,18 @@ def init_tables():
             bombs TEXT,
             revealed TEXT,
             state TEXT,
+            payout INTEGER DEFAULT 0,
+            created_at INTEGER
+        )""")
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS rocket_games (
+            game_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            bet INTEGER,
+            crash_point REAL,
+            started_at REAL,
+            state TEXT,
+            cashed_mult REAL DEFAULT 0,
             payout INTEGER DEFAULT 0,
             created_at INTEGER
         )""")
@@ -308,6 +320,129 @@ def mines_cashout(body: Auth):
         bal = bal_in(c, uid) or 0
     return {"result": "cashed", "payout": payout, "profit": payout - g["bet"],
             "bombs": g["bombs"], "revealed": g["revealed"], "balance": bal}
+
+
+# ==================== بازی پرواز راکت (Crash) ====================
+# ضریب با زمان: m(t) = e^(A*t + B*t^2)  → اول آرام، بعد کم‌کم شتاب می‌گیرد
+ROCKET_A = 0.045
+ROCKET_B = 0.0012
+ROCKET_MAX = 200.0   # سقف نقطه ترکیدن
+
+
+def rocket_mult(t: float) -> float:
+    return math.floor(math.exp(ROCKET_A * t + ROCKET_B * t * t) * 100) / 100
+
+
+def rocket_time_for(cp: float) -> float:
+    """چند ثانیه بعد از شروع، ضریب به cp می‌رسد (یعنی راکت می‌ترکد)."""
+    x = math.log(cp)
+    return (-ROCKET_A + math.sqrt(ROCKET_A ** 2 + 4 * ROCKET_B * x)) / (2 * ROCKET_B)
+
+
+def gen_crash_point() -> float:
+    """نقطه ترکیدن مخفی؛ احتمال رسیدن به x برابر ≈ (1 - HOUSE_EDGE) / x"""
+    u = secrets.SystemRandom().random()
+    cp = (1 - HOUSE_EDGE) / (1 - u)
+    return min(ROCKET_MAX, max(1.0, math.floor(cp * 100) / 100))
+
+
+def get_rocket(c, uid):
+    row = c.execute(
+        "SELECT game_id, bet, crash_point, started_at FROM rocket_games WHERE user_id=? AND state='flying'",
+        (uid,),
+    ).fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "bet": row[1], "cp": row[2], "started": row[3]}
+
+
+def rocket_settle_lost(c, g):
+    c.execute("UPDATE rocket_games SET state='lost' WHERE game_id=?", (g["id"],))
+
+
+class RocketStart(Auth):
+    bet: int
+
+
+@app.post("/api/rocket/current")
+def rocket_current(body: Auth):
+    uid = check_init_data(body.initData)["id"]
+    with Tx() as c:
+        g = get_rocket(c, uid)
+        bal = bal_in(c, uid) or 0
+        if g:
+            elapsed = time.time() - g["started"]
+            if elapsed >= rocket_time_for(g["cp"]):
+                rocket_settle_lost(c, g)
+                return {"active": False, "balance": bal, "crashed": True,
+                        "crash_point": g["cp"], "bet": g["bet"]}
+            return {"active": True, "bet": g["bet"], "elapsed": elapsed,
+                    "balance": bal, "a": ROCKET_A, "b": ROCKET_B}
+    return {"active": False, "balance": bal}
+
+
+@app.post("/api/rocket/start")
+def rocket_start(body: RocketStart):
+    uid = check_init_data(body.initData)["id"]
+    if body.bet < MIN_BET:
+        raise HTTPException(400, f"حداقل شرط {MIN_BET} الماس است")
+    if body.bet > MAX_BET:
+        raise HTTPException(400, f"حداکثر شرط {MAX_BET:,} الماس است")
+    with Tx() as c:
+        g = get_rocket(c, uid)
+        if g:
+            if time.time() - g["started"] >= rocket_time_for(g["cp"]):
+                rocket_settle_lost(c, g)
+            else:
+                raise HTTPException(400, "یک پرواز در جریان دارید")
+        bal = bal_in(c, uid)
+        if bal is None or bal < body.bet:
+            raise HTTPException(400, f"موجودی کافی نیست (موجودی شما {(bal or 0):,} الماس است)")
+        c.execute("UPDATE users SET diamonds = diamonds - ? WHERE user_id=?", (body.bet, uid))
+        c.execute(
+            "INSERT INTO rocket_games (user_id, bet, crash_point, started_at, state, created_at) VALUES (?,?,?,?,?,?)",
+            (uid, body.bet, gen_crash_point(), time.time(), "flying", int(time.time())),
+        )
+        new_bal = bal - body.bet
+    return {"bet": body.bet, "elapsed": 0, "balance": new_bal, "a": ROCKET_A, "b": ROCKET_B}
+
+
+@app.post("/api/rocket/state")
+def rocket_state(body: Auth):
+    uid = check_init_data(body.initData)["id"]
+    with Tx() as c:
+        g = get_rocket(c, uid)
+        bal = bal_in(c, uid) or 0
+        if not g:
+            return {"state": "none", "balance": bal}
+        elapsed = time.time() - g["started"]
+        if elapsed >= rocket_time_for(g["cp"]):
+            rocket_settle_lost(c, g)
+            return {"state": "crashed", "crash_point": g["cp"], "lost": g["bet"], "balance": bal}
+        return {"state": "flying", "multiplier": rocket_mult(elapsed), "elapsed": elapsed}
+
+
+@app.post("/api/rocket/cashout")
+def rocket_cashout(body: Auth):
+    uid = check_init_data(body.initData)["id"]
+    with Tx() as c:
+        g = get_rocket(c, uid)
+        if not g:
+            raise HTTPException(400, "پرواز فعالی وجود ندارد")
+        now = time.time()
+        elapsed = now - g["started"]
+        t_crash = rocket_time_for(g["cp"])
+        bal = bal_in(c, uid) or 0
+        if elapsed >= t_crash:  # قبل از رسیدن درخواست، ترکیده بود
+            rocket_settle_lost(c, g)
+            return {"result": "crashed", "crash_point": g["cp"], "lost": g["bet"], "balance": bal}
+        m = rocket_mult(elapsed)
+        payout = int(g["bet"] * m)
+        c.execute("UPDATE users SET diamonds = diamonds + ? WHERE user_id=?", (payout, uid))
+        c.execute("UPDATE rocket_games SET state='cashed', cashed_mult=?, payout=? WHERE game_id=?",
+                  (m, payout, g["id"]))
+        return {"result": "cashed", "multiplier": m, "payout": payout, "profit": payout - g["bet"],
+                "crash_point": g["cp"], "elapsed": elapsed, "balance": bal + payout}
 
 
 # ==================== صفحات ====================
