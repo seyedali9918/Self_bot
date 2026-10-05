@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 # ==================== تنظیمات ====================
-BOT_TOKEN = "8846145059:AAGLLYBS21rPEJ4iXJSRuz3bgRkLqT-okU0"
+BOT_TOKEN = "8200221816:AAGJZrs4yMI4lEIhODo9gAoBvN0ZJln_454"
 DIAMOND_RATE = 40
 DB_PATH = os.path.join(os.getcwd(), "data", "vip_bet.db")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
